@@ -62,6 +62,7 @@ set(MUJOCO_ENGINE_SRCS
     engine_plugin.h
     engine_print.c
     engine_print.h
+    engine_query.c
     engine_ray.c
     engine_ray.h
     engine_sensor.c
