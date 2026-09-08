@@ -23,6 +23,8 @@ set(MUJOCO_ENGINE_SRCS
     engine_collision_driver.h
     engine_collision_gjk.c
     engine_collision_gjk.h
+    engine_collision_hfield.c
+    engine_collision_hfield.h
     engine_collision_primitive.c
     engine_collision_primitive.h
     engine_collision_sdf.c
