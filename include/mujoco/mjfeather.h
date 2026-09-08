@@ -20,6 +20,36 @@
 extern "C" {
 #endif
 
+// Stable source identity and layout introspection; safe before allocating a model.
+// layout(type, NULL) returns sizeof(type); a named field returns offsetof(type, field).
+// Supported types: mjModel, mjData, mjOption, mjContact, mjtNum. Unknown => -1.
+MJAPI const char* mjf_buildId(void);
+MJAPI int mjf_layout(const char* type, const char* field);
+
+// Wake all sleeping islands without changing positions, velocities or applied forces.
+MJAPI int mjf_wakeAll(const mjModel* m, mjData* d);
+
+// Validate the whole input, clamp to [0,1], write only changes and wake this data's
+// sleeping islands. Shared-model callers must also wake their other datas.
+// Returns -1 for invalid input (no writes), 0 for identical data, 1 for a change.
+MJAPI int mjf_writeHfieldData(mjModel* m, mjData* d, int id,
+                             const float* values, int count);
+
+// World-space velocities [angular xyz, linear xyz], body or body-frame origin.
+// Output shape: [ndata, nbody, 6], double precision. No stepping or allocations.
+// Returns -1 for invalid input without writes, otherwise 0.
+MJAPI int mjf_bodyVelocities(const mjModel* m, mjData* const* datas, int ndata,
+                             const int* bodies, int nbody, int object_type, mjtNum* out);
+
+// Training substeps with post-step joint/root velocity clamps and one-shot linear
+// body force on the first substep. Preserve persistent forces; never subtract the
+// impulse after MuJoCo auto-resets. Consume BADQPOS/VEL/ACC warnings per substep.
+// Returns -1 for invalid arguments, otherwise whether any divergence was consumed.
+MJAPI int mjf_stepGuarded(const mjModel* m, mjData* d, int nstep,
+                          const int* joint_dofs, const mjtNum* limits, int njoint,
+                          int root_dof, mjtNum root_cap, int impulse_body,
+                          const mjtNum* impulse_force);
+
 // Result of mjf_raycast. Doubles first for a clean, blittable C#-marshalable layout.
 typedef struct mjfRayHit_ {
   mjtNum dist;       // distance from origin to hit along the (normalized) ray
@@ -45,6 +75,18 @@ MJAPI int mjf_raycast(const mjModel* m, const mjData* d,
 MJAPI int mjf_overlapSphere(const mjModel* m, const mjData* d,
                             const mjtNum center[3], mjtNum radius,
                             int bodyexclude, int* geoms, int maxgeoms);
+
+// Gameplay variants: include geoms whose (contype | conaffinity) intersects mask.
+// mask=-1 includes all collidable geoms; mask=0 includes none. Disabled collision
+// geoms are excluded. Ray visibility/static rules remain those of mj_ray.
+MJAPI int mjf_raycastFiltered(const mjModel* m, const mjData* d,
+                              const mjtNum origin[3], const mjtNum dir[3],
+                              int bodyexclude, mjtBool include_static, int mask,
+                              mjfRayHit* out);
+// Includes planes as solid halfspaces, once each; returns TOTAL candidates.
+MJAPI int mjf_overlapSphereFiltered(const mjModel* m, const mjData* d,
+                                    const mjtNum center[3], mjtNum radius,
+                                    int bodyexclude, int mask, int* geoms, int maxgeoms);
 
 #ifdef __cplusplus
 }

@@ -1305,9 +1305,9 @@ static int point_in_box(const mjtNum aabb[6], const mjtNum xpos[3],
 // intersect ray (pnt+x*vec, x>=0) with visible geoms, except geoms on bodyexclude
 //  return geomid and distance (x) to nearest surface, or -1 if no intersection
 //  geomgroup, flg_static are as in mjvOption; geomgroup==NULL skips group exclusion
-mjtNum mj_ray(const mjModel* m, const mjData* d, const mjtNum pnt[3], const mjtNum vec[3],
+mjtNum mj_rayMask(const mjModel* m, const mjData* d, const mjtNum pnt[3], const mjtNum vec[3],
               const mjtByte* geomgroup, mjtBool flg_static, int bodyexclude,
-              int geomid[1], mjtNum normal[3]) {
+              int geomid[1], mjtNum normal[3], const int* collision_mask) {
   int ngeom = m->ngeom;
   mjtNum dist, newdist;
   mjtNum normal_local[3];
@@ -1325,6 +1325,7 @@ mjtNum mj_ray(const mjModel* m, const mjData* d, const mjtNum pnt[3], const mjtN
 
   // loop over geoms not eliminated by mask and bodyexclude
   for (int i=0; i < ngeom; i++) {
+    if (collision_mask && !((m->geom_contype[i] | m->geom_conaffinity[i]) & *collision_mask)) continue;
     if (!ray_eliminate(m, d, i, geomgroup, flg_static, bodyexclude)) {
       int type = m->geom_type[i];
       if (type == mjGEOM_MESH) {
@@ -1348,6 +1349,14 @@ mjtNum mj_ray(const mjModel* m, const mjData* d, const mjtNum pnt[3], const mjtN
   }
 
   return dist;
+}
+
+
+// Preserve the upstream ray contract for sensors and other native consumers.
+mjtNum mj_ray(const mjModel* m, const mjData* d, const mjtNum pnt[3], const mjtNum vec[3],
+              const mjtByte* geomgroup, mjtBool flg_static, int bodyexclude,
+              int geomid[1], mjtNum normal[3]) {
+  return mj_rayMask(m, d, pnt, vec, geomgroup, flg_static, bodyexclude, geomid, normal, NULL);
 }
 
 
