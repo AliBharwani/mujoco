@@ -121,8 +121,12 @@ static int mjc_penetration(const mjModel* m, mjData* d, mjCCDObj* obj1, mjCCDObj
       con[i].dist = margin + status.dist[i];
       mji_add3(con[i].pos, status.x1 + 3*i, status.x2 + 3*i);
       mju_scl3(con[i].pos, con[i].pos, 0.5);
-      mji_sub3(con[i].normal, status.x1 + 3*i, status.x2 + 3*i);
-      mju_normalize3(con[i].normal);
+      if (status.normal_valid) {
+        mji_copy3(con[i].normal, status.normal);
+      } else {
+        mji_sub3(con[i].normal, status.x1 + 3*i, status.x2 + 3*i);
+        mju_normalize3(con[i].normal);
+      }
       mji_zero3(con[i].tangent);
     }
     ncon = nwitness;

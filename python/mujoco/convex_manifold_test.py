@@ -36,6 +36,17 @@ class ConvexManifoldTest(unittest.TestCase):
       np.testing.assert_allclose(d.contact.frame[:,:3],expected,atol=1e-8,rtol=0)
       np.testing.assert_allclose(np.sort(np.abs(d.contact.pos[:,:2]),axis=0),np.tile([.2,.3],(4,1)),atol=3e-8,rtol=0)
 
+  def test_near_margin_coincident_witnesses_keep_the_face_normal(self):
+    # Binary-exact mesh extents put two tilted vertices within a few ulps of
+    # the margin. Their inflated witnesses are too close to normalize reliably.
+    m=model(margin=.015625,size=(.25,.25,.125));d=mj.MjData(m)
+    for angle in (.0001,.0005,.001):
+      d.qpos[3:]=[np.cos(angle/2),0,np.sin(angle/2),0]
+      d.qpos[2]=.03125+.125*np.cos(angle)-.25*np.sin(angle)
+      mj.mj_forward(m,d);self.assertEqual(d.ncon,4)
+      self.assertTrue(np.any(np.abs(d.contact.dist-.03125)<1e-14))
+      np.testing.assert_allclose(d.contact.frame[:,:3],np.tile([0,0,1],(4,1)),atol=1e-8,rtol=0)
+
   def test_outside_margin_does_not_invent_contacts(self):
     for floor in ('box','mesh'):
       m=model(floor);d=mj.MjData(m);d.qpos[2]+=.021

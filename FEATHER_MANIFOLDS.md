@@ -1,4 +1,4 @@
-# Positive-margin convex manifolds (3.12 integration5)
+# Positive-margin convex manifolds (3.12 integration6)
 
 Upstream 3.12 already has native EPA face recovery and polygon clipping for
 box/mesh pairs. Positive margins force those pairs through the older perturbed
@@ -10,6 +10,10 @@ recovers opposing faces, clip the original physical faces, retain vertices withi
 the combined contact margin, and calculate each vertex's signed depth along the
 reference normal. Reconstruct the inflated witnesses using half of each CCD
 object's own margin. The existing caller restores physical distance and midpoint.
+Integration6 also carries the recovered reference normal explicitly in the
+internal CCD result. Near the margin the inflated witnesses can coincide to
+machine precision, so deriving the normal from their difference loses its
+direction. A binary-exact tilted-box mesh regression covers that boundary.
 Zero-margin arithmetic and the existing polygon reduction are preserved. Mesh
 pairs retain the four-contact cap, box-box the upstream eight-contact cap.
 
@@ -26,5 +30,5 @@ Actual-ankle quality probes are passive native fixtures, not Unity acceptance.
 
 This candidate also corrects regional waking to use the SUM of the two geom
 margins, as 3.12's collision driver does. A regression requires the sum to wake a
-nearby sleeping rack. Integration4 is preserved for provenance but integration5
-supersedes it for deployment.
+nearby sleeping rack. Integration4 is preserved for provenance but integration6
+supersedes integrations4/5 for deployment.

@@ -2206,6 +2206,8 @@ TEST_F(MjGjkTest, PositiveMarginFaceWitnessesRespectEachObject) {
     mjCCDStatus status;
     EXPECT_LT(mjc_ccd(&config, &status, &obj1, &obj2), 0);
     ASSERT_EQ(status.nx, 4);
+    ASSERT_TRUE(status.normal_valid);
+    EXPECT_THAT(status.normal, Pointwise(DoubleNear(1e-9), std::vector<mjtNum>{0, 0, 1}));
     for (int i = 0; i < status.nx; ++i) {
       EXPECT_NEAR(status.x1[3*i+2], .5*margins.first, 1e-9);
       EXPECT_NEAR(status.x2[3*i+2], .0005-.5*margins.second, 1e-9);

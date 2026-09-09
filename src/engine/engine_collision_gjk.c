@@ -1719,6 +1719,13 @@ static void polygonClip(mjCCDStatus* status, const mjtNum* face1, int nface1,
     return;
   }
 
+  // Near the margin the inflated witnesses coincide to machine precision.
+  // Retain the known face normal instead of recovering it from their difference.
+  if (margin > 0) {
+    copy3(status->normal, n);
+    status->normal_valid = 1;
+  }
+
   // copy final clipped polygon to status
   if (status->max_contacts < 5 && npolygon > 4) {
     status->nx = 4;
@@ -2338,6 +2345,7 @@ size_t mjc_ccdSize(int npolygonmax, int nmeshdegmax, int iterations) {
 // general convex collision detection
 mjtNum mjc_ccd(const mjCCDConfig* config, mjCCDStatus* status, mjCCDObj* obj1, mjCCDObj* obj2) {
   // setup
+  status->normal_valid = 0;
   obj1->center(status->x1, obj1);
   obj2->center(status->x2, obj2);
   status->gjk_iterations = 0;
