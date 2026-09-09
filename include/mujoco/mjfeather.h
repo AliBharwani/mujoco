@@ -42,6 +42,20 @@ MJAPI int mjf_wakeAll(const mjModel* m, mjData* d);
 MJAPI int mjf_writeHfieldData(mjModel* m, mjData* d, int id,
                              const float* values, int count);
 
+// Contiguous row update. values contains row_count*ncol floats, starting at
+// row_start. Validates before any write; identical rows do not wake or refit.
+// Returns -1 for invalid input, 0 for no change, 1 otherwise. All model users
+// must be idle during writes. Shared-model callers must wake their other datas.
+MJAPI int mjf_writeHfieldRows(mjModel* m, mjData* d, int id, int row_start,
+                             int row_count, const float* values, int count);
+
+// Opt in to cached hfield search (initially disabled for raw-write compatibility).
+// Nonzero fully refreshes then enables this field; zero disables it. Subsequent
+// writes must use the write APIs above, or call this again to refresh after raw
+// writes BEFORE collision. Call while all readers of this model are idle.
+// Returns -1 for invalid input (including non-finite raw heights), 0 otherwise.
+MJAPI int mjf_enableHfieldMip(mjModel* m, int id, int enable);
+
 // World-space velocities [angular xyz, linear xyz], body or body-frame origin.
 // Output shape: [ndata, nbody, 6], double precision. No stepping or allocations.
 // Returns -1 for invalid input without writes, otherwise 0.

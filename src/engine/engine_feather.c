@@ -13,6 +13,7 @@
 
 #include <mujoco/mjfeather.h>
 #include <mujoco/mujoco.h>
+#include "engine/engine_collision_hfield.h"
 #include "engine/engine_sleep.h"
 #include "build_id.h"
 
@@ -59,6 +60,7 @@ int mjf_layout(const char* type, const char* field) {
   SIZE(mjtNum); SIZE(mjModel); SIZE(mjData); SIZE(mjOption); SIZE(mjContact);
   OFFSET(mjModel, opt); OFFSET(mjModel, nq); OFFSET(mjModel, body_mass);
   OFFSET(mjModel, geom_type); OFFSET(mjModel, geom_size); OFFSET(mjModel, hfield_data);
+  OFFSET(mjModel, hfield_mipmin); OFFSET(mjModel, hfield_mipmax); OFFSET(mjModel, hfield_mipvalid);
   OFFSET(mjData, qpos); OFFSET(mjData, qvel); OFFSET(mjData, contact);
   OFFSET(mjData, xpos); OFFSET(mjData, xfrc_applied); OFFSET(mjData, tree_asleep);
   OFFSET(mjContact, dist); OFFSET(mjContact, pos); OFFSET(mjContact, frame);
@@ -83,19 +85,55 @@ int mjf_wakeAll(const mjModel* m, mjData* d) {
 }
 
 int mjf_writeHfieldData(mjModel* m, mjData* d, int id, const float* values, int count) {
-  if (!m || !d || !values || id < 0 || id >= m->nhfield ||
-      count != m->hfield_nrow[id]*m->hfield_ncol[id]) return -1;
+  if (!m || id < 0 || id >= m->nhfield) return -1;
+  return mjf_writeHfieldRows(m, d, id, 0, m->hfield_nrow[id], values, count);
+}
+
+int mjf_enableHfieldMip(mjModel* m, int id, int enable) {
+  if (!m || id < 0 || id >= m->nhfield) return -1;
+  if (!enable) {
+    m->hfield_mipvalid[id] = 0;
+    return 0;
+  }
+  const float* heights = m->hfield_data + m->hfield_adr[id];
+  mjtSize n = (mjtSize)m->hfield_nrow[id]*m->hfield_ncol[id];
+  for (mjtSize i = 0; i < n; i++) {
+    if (!isfinite(heights[i])) {
+      m->hfield_mipvalid[id] = 0;
+      return -1;
+    }
+  }
+  mjc_updateHFieldMip(m, id, 0, m->hfield_nrow[id]-1, 0, m->hfield_ncol[id]-1);
+  m->hfield_mipvalid[id] = 1;
+  return 0;
+}
+
+int mjf_writeHfieldRows(mjModel* m, mjData* d, int id, int row_start,
+                       int row_count, const float* values, int count) {
+  if (!m || !d || !values || id < 0 || id >= m->nhfield || row_start < 0 ||
+      row_count < 0 || row_start > m->hfield_nrow[id] ||
+      row_count > m->hfield_nrow[id]-row_start ||
+      count != (mjtSize)row_count*m->hfield_ncol[id]) return -1;
   for (int i = 0; i < count; i++) {
     if (!isfinite(values[i])) return -1;
   }
-  float* dst = m->hfield_data + m->hfield_adr[id];
-  int changed = 0;
+  int nc = m->hfield_ncol[id];
+  float* dst = m->hfield_data + m->hfield_adr[id] + (mjtSize)row_start*nc;
+  int rmin = m->hfield_nrow[id], rmax = -1, cmin = nc, cmax = -1;
   for (int i = 0; i < count; i++) {
     float v = values[i] < 0 ? 0 : values[i] > 1 ? 1 : values[i];
-    if (dst[i] != v) { dst[i] = v; changed = 1; }
+    if (dst[i] != v) {
+      dst[i] = v;
+      int r = row_start+i/nc, c = i%nc;
+      rmin = mjMIN(rmin, r); rmax = mjMAX(rmax, r);
+      cmin = mjMIN(cmin, c); cmax = mjMAX(cmax, c);
+    }
   }
-  if (changed) mjf_wakeAll(m, d);
-  return changed;
+  if (rmax >= 0) {
+    if (m->hfield_mipvalid[id]) mjc_updateHFieldMip(m, id, rmin, rmax, cmin, cmax);
+    mjf_wakeAll(m, d);
+  }
+  return rmax >= 0;
 }
 
 int mjf_bodyVelocities(const mjModel* m, mjData* const* datas, int ndata,

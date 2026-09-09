@@ -12,15 +12,127 @@
 // For interior polyhedra, clip the lower hull surface to each top triangle's XY
 // footprint instead. The resulting witnesses belong to the actual hull; their
 // signed distances, midpoints, and normals all refer to the same terrain plane.
-// No model/data layout changes and no writes to compiled geometry.
+// The optional model-owned min/max pyramid skips empty tiles. Its default is
+// disabled so direct writes to the upstream height array remain supported.
 
 #include "engine/engine_collision_hfield.h"
 
+#include <string.h>
 #include <mujoco/mjmacro.h>
 #include "engine/engine_memory.h"
 #include "engine/engine_util_blas.h"
 #include "engine/engine_util_misc.h"
 #include "engine/engine_util_spatial.h"
+
+
+// 2x2-cell leaves bound all nine corner samples, including shared edges. Halving
+// each dimension with rounding up gives a packed pyramid smaller than nrow*ncol,
+// even for odd or one-cell-wide grids. Reuse hfield_adr to partition its buffers.
+typedef struct {
+  int nlevel;
+  int rows[32], cols[32];
+  mjtSize adr[32];
+} HFieldMip;
+
+static HFieldMip mipLayout(int nr, int nc, int adr) {
+  HFieldMip mip;
+  mip.nlevel = 1;
+  mip.rows[0] = nr/2;
+  mip.cols[0] = nc/2;
+  mip.adr[0] = adr;
+  while (mip.rows[mip.nlevel-1] > 1 || mip.cols[mip.nlevel-1] > 1) {
+    int i = mip.nlevel++;
+    mip.rows[i] = (mip.rows[i-1]+1)/2;
+    mip.cols[i] = (mip.cols[i-1]+1)/2;
+    mip.adr[i] = mip.adr[i-1] + (mjtSize)mip.rows[i-1]*mip.cols[i-1];
+  }
+  return mip;
+}
+
+void mjc_updateHFieldMip(mjModel* m, int id, int rmin, int rmax, int cmin, int cmax) {
+  int nr = m->hfield_nrow[id], nc = m->hfield_ncol[id];
+  const float* heights = m->hfield_data + m->hfield_adr[id];
+  HFieldMip mip = mipLayout(nr, nc, m->hfield_adr[id]);
+  // An edited vertex changes cells on both sides, including across tile seams.
+  rmin = mjMAX(0, rmin-1)/2; rmax = mjMIN(nr-2, rmax)/2;
+  cmin = mjMAX(0, cmin-1)/2; cmax = mjMIN(nc-2, cmax)/2;
+  for (int level = 0; level < mip.nlevel; level++) {
+    for (int r = rmin; r <= rmax; r++) {
+      for (int c = cmin; c <= cmax; c++) {
+        float lo = 0, hi = 0;
+        int first = 1;
+        int child_nr = level ? mip.rows[level-1] : nr;
+        int child_nc = level ? mip.cols[level-1] : nc;
+        int width = level ? 1 : 2;
+        for (int y = 2*r; y <= mjMIN(2*r+width, child_nr-1); y++) {
+          for (int x = 2*c; x <= mjMIN(2*c+width, child_nc-1); x++) {
+            mjtSize child = level ? mip.adr[level-1] + (mjtSize)y*child_nc+x :
+                                    (mjtSize)y*nc+x;
+            float a = level ? m->hfield_mipmin[child] : heights[child];
+            float b = level ? m->hfield_mipmax[child] : heights[child];
+            if (first || a < lo) lo = a;
+            if (first || b > hi) hi = b;
+            first = 0;
+          }
+        }
+        mjtSize at = mip.adr[level] + (mjtSize)r*mip.cols[level]+c;
+        m->hfield_mipmin[at] = lo;
+        m->hfield_mipmax[at] = hi;
+      }
+    }
+    rmin /= 2; rmax /= 2; cmin /= 2; cmax /= 2;
+  }
+}
+
+typedef struct {
+  const mjModel* m;
+  HFieldMip mip;
+  const mjtNum* size;
+  const mjtNum* a;
+  mjtNum dx, dy, zx, zy, zmin, margin;
+  int nr, nc, rmin, rmax, cmin, cmax;
+  unsigned char* cells;
+} HFieldQuery;
+
+// Mark surviving leaf cells, then run the original row-major contact pass.
+// Separating search order from contact order preserves deterministic reduction.
+static void queryMip(HFieldQuery* q, int level, int row, int col) {
+  mjtSize span = (mjtSize)1 << (level+1);
+  int rmin = mjMAX(q->rmin, row*span);
+  int rmax = mjMIN(q->rmax, (row+1)*span-1);
+  int cmin = mjMAX(q->cmin, col*span);
+  int cmax = mjMIN(q->cmax, (col+1)*span-1);
+  if (rmin > rmax || cmin > cmax) return;
+
+  mjtSize at = q->mip.adr[level] + (mjtSize)row*q->mip.cols[level]+col;
+  mjtNum lo = q->m->hfield_mipmin[at]*q->size[2];
+  mjtNum hi = q->m->hfield_mipmax[at]*q->size[2];
+  // Range bounds the terrain gradients and therefore the normal-distance margin.
+  mjtNum bound = hi + q->margin*(1 + (hi-lo)*(1/q->dx + 1/q->dy));
+  // The hull plane's minimum over the tile rectangle is a lower bound on its
+  // minimum over the clipped triangle. Fall back to the triangle minimum when
+  // its XY projection is ill-conditioned (zx=zy=0 in that case).
+  mjtNum x = (q->zx >= 0 ? cmin : cmax+1)*q->dx - q->size[0];
+  mjtNum y = (q->zy >= 0 ? rmin : rmax+1)*q->dy - q->size[1];
+  mjtNum height = q->a[2] + q->zx*(x-q->a[0]) + q->zy*(y-q->a[1]);
+  mjtNum lower = mjMAX(q->zmin, height);
+  mjtNum guard = 1e-10*(1 + mju_abs(bound) + mju_abs(lower) +
+                        mju_abs(q->zx)*(1+mju_abs(x)+mju_abs(q->a[0])) +
+                        mju_abs(q->zy)*(1+mju_abs(y)+mju_abs(q->a[1])));
+  if (lower > bound + guard) return;
+
+  if (level) {
+    for (int r = 2*row; r <= mjMIN(2*row+1, q->mip.rows[level-1]-1); r++) {
+      for (int c = 2*col; c <= mjMIN(2*col+1, q->mip.cols[level-1]-1); c++) {
+        queryMip(q, level-1, r, c);
+      }
+    }
+  } else {
+    for (int r = rmin; r <= rmax; r++) {
+      memset(q->cells + (mjtSize)(r-q->rmin)*q->nc + cmin-q->cmin, 1, cmax-cmin+1);
+    }
+  }
+}
 
 
 static mjtNum distance2(const mjtNum a[3], const mjtNum b[3]) {
@@ -217,7 +329,8 @@ static int aboveFootprint(const mjtNum* vertices, int nv, const mjtNum size[4],
 
 
 // Intersect a lower hull triangle with the top surface, restricted to its cells.
-static int collideTriangle(mjPreContact* con, int ncon, const mjtNum* a,
+static int collideTriangle(const mjModel* m, mjData* d, int hid,
+                           mjPreContact* con, int ncon, const mjtNum* a,
                            const mjtNum* b, const mjtNum* c, const mjtNum size[4],
                            const float* heights, int nr, int nc, mjtNum margin) {
   mjtNum dx = 2*size[0] / (nc - 1), dy = 2*size[1] / (nr - 1);
@@ -230,9 +343,34 @@ static int collideTriangle(mjPreContact* con, int ncon, const mjtNum* a,
   int cmax = mjMIN(nc - 2, (int)mju_floor((xmax + size[0])/dx));
   int rmin = mjMAX(0, (int)mju_floor((ymin + size[1])/dy));
   int rmax = mjMIN(nr - 2, (int)mju_floor((ymax + size[1])/dy));
+  unsigned char* cells = NULL;
+  mjtSize ncell = (mjtSize)(rmax-rmin+1)*(cmax-cmin+1);
+  if (m->hfield_mipvalid[hid] && ncell >= 16 && dx*dy >= 1e-12 &&
+      margin >= 0 && margin <= size[0]+size[1]) {
+    mj_markStack(d);
+    cells = mj_stackAllocByte(d, ncell, 1);
+    memset(cells, 0, ncell);
+    HFieldQuery q = {.m = m, .mip = mipLayout(nr, nc, m->hfield_adr[hid]),
+      .size = size, .a = a, .dx = dx, .dy = dy, .zmin = zmin, .margin = margin,
+      .nr = rmax-rmin+1, .nc = cmax-cmin+1, .rmin = rmin, .rmax = rmax,
+      .cmin = cmin, .cmax = cmax, .cells = cells};
+    mjtNum bx = b[0]-a[0], by = b[1]-a[1], bz = b[2]-a[2];
+    mjtNum cx = c[0]-a[0], cy = c[1]-a[1], cz = c[2]-a[2];
+    mjtNum det = bx*cy-by*cx;
+    mjtNum fallback[3] = {0, 0, zmin};
+    if (mju_abs(det) > 1e-12*(1+mju_abs(bx*cy)+mju_abs(by*cx))) {
+      q.zx = (bz*cy-by*cz)/det;
+      q.zy = (bx*cz-bz*cx)/det;
+    } else {
+      // q.a[2] must not raise the bound when no plane gradient is available.
+      q.a = fallback;
+    }
+    queryMip(&q, q.mip.nlevel-1, 0, 0);
+  }
   const int corners[2][3] = {{0, 1, 2}, {0, 2, 3}};
   for (int r = rmin; r <= rmax; r++) {
     for (int col = cmin; col <= cmax; col++) {
+      if (cells && !cells[(mjtSize)(r-rmin)*(cmax-cmin+1)+col-cmin]) continue;
       mjtNum x = col*dx - size[0], y = r*dy - size[1];
       mjtNum cell[4][3] = {
         {x, y, heights[r*nc + col]*size[2]},
@@ -262,6 +400,7 @@ static int collideTriangle(mjPreContact* con, int ncon, const mjtNum* a,
       }
     }
   }
+  if (cells) mj_freeStack(d);
   return ncon;
 }
 
@@ -327,7 +466,7 @@ int mjc_PolyHField(const mjModel* m, mjData* d, mjPreContact* con,
       }
       const int* ids = m->mesh_polyvert + m->mesh_polyvertadr[f];
       for (int j = 1; j + 1 < m->mesh_polyvertnum[f]; j++) {
-        ncon = collideTriangle(con, ncon, vertices + 3*ids[0], vertices + 3*ids[j],
+        ncon = collideTriangle(m, d, hid, con, ncon, vertices + 3*ids[0], vertices + 3*ids[j],
                                vertices + 3*ids[j + 1], size, heights, nr, nc, margin);
       }
     }
@@ -339,7 +478,7 @@ int mjc_PolyHField(const mjModel* m, mjData* d, mjPreContact* con,
         continue;
       }
       for (int j = 1; j < 3; j++) {
-        ncon = collideTriangle(con, ncon, vertices + 3*faces[f][0], vertices + 3*faces[f][j],
+        ncon = collideTriangle(m, d, hid, con, ncon, vertices + 3*faces[f][0], vertices + 3*faces[f][j],
                                vertices + 3*faces[f][j + 1], size, heights, nr, nc, margin);
       }
     }
