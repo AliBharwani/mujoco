@@ -19,35 +19,18 @@
 #include <cstring>
 #include <memory>
 
+#include <mujoco/mjrfilament.h>
 #include <mujoco/mjvisualize.h>
 #include <mujoco/mujoco.h>
-#include "experimental/filament/compat/model_objects.h"
-#include "experimental/filament/render_context_filament.h"
-#include "experimental/filament/render_context_filament_cpp.h"
+#include "experimental/filament/compat/scene_objects.h"
+#include "render/filament/mjrfilament_cpp.h"
+#include "render/filament/support/model_objects.h"
 
 namespace mujoco {
 
-// Returns the tile size for infinite plane texture alignment.
-// This is duplicated from engine_vis_visualize.c (re-center infinite plane)
-// to ensure UV scaling matches the re-centering increments.
-static float GetPlaneTileSize(const mjModel* model, int matid,
-                              float texrepeat) {
-  if (matid >= 0 && texrepeat > 0) {
-    return 2.0f / texrepeat;
-  } else {
-    const float zfar = model->vis.map.zfar * model->stat.extent;
-    return 2.1f * zfar / (mjMAXPLANEGRID - 2);
-  }
-}
-
-static bool IsBehind(const float* headpos, const float* pos, const float* mat) {
-  return ((headpos[0] - pos[0]) * mat[2] + (headpos[1] - pos[1]) * mat[5] +
-              (headpos[2] - pos[2]) * mat[8] <
-          0.0f);
-}
-
-static void PrepareGeomMeshes(mjrRenderable* renderable, const mjvGeom& geom,
-                              ModelObjects* model_objs) {
+static void PrepareGeomMeshes(mjrfRenderable* renderable, const mjvGeom& geom,
+                              ModelObjects* model_objs,
+                              SceneObjects* scene_objs) {
   const mjModel* model = model_objs->GetModel();
   const int nstack = model->vis.quality.numstacks;
   const int nslice = model->vis.quality.numslices;
@@ -69,19 +52,8 @@ static void PrepareGeomMeshes(mjrRenderable* renderable, const mjvGeom& geom,
       break;
     case mjGEOM_PLANE: {
       mjrf_setRenderableGeomMesh(renderable, geom_type, nstack, nslice, nquad);
-
-      float size[3];
-      std::memcpy(size, &geom.size, 3 * sizeof(float));
-      const bool is_infinite = !(size[0] > 0 && size[1] > 0);
-      if (is_infinite) {
-        // Infinite planes are scaled to match the tile size used by
-        // re-centering in engine_vis_visualize.c.
-        const float plane_scale = static_cast<float>(mjMAXPLANEGRID) / 2.0f;
-        size[0] = plane_scale;
-        size[1] = plane_scale;
-      }
       // Planes only define an xy size, so set the z-dimension to 1.0f.
-      size[2] = 1.0f;
+      const float size[3] = {geom.size[0], geom.size[1], 1.0f};
       mjrf_setRenderableSize(renderable, size);
       break;
     }
@@ -130,7 +102,7 @@ static void PrepareGeomMeshes(mjrRenderable* renderable, const mjvGeom& geom,
       mjrf_setRenderableSize(renderable, geom.size);
       break;
     case mjGEOM_FLEX:
-      mjrf_setRenderableMesh(renderable, model_objs->GetFlexMesh(geom.objid), 0, 0);
+      mjrf_setRenderableMesh(renderable, scene_objs->GetFlexMesh(geom.objid), 0, 0);
       // Flexes are defined in global space.
       std::memset(position, 0, sizeof(position));
       std::memset(rotation, 0, sizeof(rotation));
@@ -139,7 +111,7 @@ static void PrepareGeomMeshes(mjrRenderable* renderable, const mjvGeom& geom,
       rotation[8] = 1.f;
       break;
     case mjGEOM_SKIN:
-      mjrf_setRenderableMesh(renderable, model_objs->GetSkinMesh(geom.objid), 0, 0);
+      mjrf_setRenderableMesh(renderable, scene_objs->GetSkinMesh(geom.objid), 0, 0);
       // Skins are defined in global space.
       std::memset(position, 0, sizeof(position));
       std::memset(rotation, 0, sizeof(rotation));
@@ -159,13 +131,12 @@ static void PrepareGeomMeshes(mjrRenderable* renderable, const mjvGeom& geom,
   mjrf_setRenderableTransform(renderable, position, rotation);
 }
 
-static void UpdateGeomMaterial(mjrRenderable* renderable, const mjvGeom& geom,
-                               ModelObjects* model_objs, const float headpos[3],
-                               const mjtByte render_flags[mjNRNDFLAG]) {
+static void UpdateGeomMaterial(mjrfRenderable* renderable, const mjvGeom& geom,
+                               ModelObjects* model_objs) {
   const mjModel* model = model_objs->GetModel();
 
-  mjrMaterial material;
-  mjr_defaultMaterial(&material);
+  mjrfMaterial material;
+  mjrf_defaultMaterial(&material);
 
   if (geom.category == mjCAT_DECOR) {
     material.decor_ux = true;
@@ -175,24 +146,9 @@ static void UpdateGeomMaterial(mjrRenderable* renderable, const mjvGeom& geom,
   material.color[1] = geom.rgba[1];
   material.color[2] = geom.rgba[2];
   material.color[3] = geom.rgba[3];
-  if (geom.type == mjGEOM_PLANE) {
-    if (IsBehind(headpos, geom.pos, geom.mat)) {
-      material.color[3] *= 0.3;
-      mjrf_setRenderableReceiveShadows(renderable, false);
-      material.reflective = false;
-    } else {
-      mjrf_setRenderableReceiveShadows(renderable, true);
-      material.reflective = geom.reflectance > 0 && material.color[3] == 1.0f;
-    }
-  }
-  mjrf_setRenderableLayerMask(renderable, geom.category);
-  if (geom.category == mjCAT_DECOR) {
-    mjrf_setRenderableCastShadows(renderable, false);
-    mjrf_setRenderableReceiveShadows(renderable, false);
-  }
 
   if (geom.matid >= 0 && geom.matid < model->nmat) {
-    auto get_texture = [&](int role) -> const mjrTexture* {
+    auto get_texture = [&](int role) -> const mjrfTexture* {
       const int tex_id = model->mat_texid[geom.matid * mjNTEXROLE + role];
       return tex_id >= 0 ? model_objs->GetTexture(tex_id) : nullptr;
     };
@@ -205,6 +161,9 @@ static void UpdateGeomMaterial(mjrRenderable* renderable, const mjvGeom& geom,
     material.roughness_texture = get_texture(mjTEXROLE_ROUGHNESS);
     material.occlusion_texture = get_texture(mjTEXROLE_OCCLUSION);
   }
+  if (geom.texid >= 0) {
+    material.color_texture = model_objs->GetTexture(geom.texid);
+  }
 
   material.reflectance = geom.reflectance;
   material.emissive = geom.emission;
@@ -215,19 +174,12 @@ static void UpdateGeomMaterial(mjrRenderable* renderable, const mjvGeom& geom,
     material.roughness = model->mat_roughness[geom.matid];
   }
 
-  if (geom.segid >= 0) {
-    uint32_t segmentation_color = geom.segid + 1;
-    const bool use_segid_color = render_flags[mjRND_IDCOLOR];
-    if (!use_segid_color) {
-      constexpr double phi1 = 1.61803398874989484820;  // Cached Phi(1).
-      constexpr double coef1 = 1.0 / phi1;
-      const double index = static_cast<double>(geom.segid);
-      const double sample = std::fmod(0.5 + coef1 * index, 1.0);
-      segmentation_color = 0x01000000 * sample;
-    }
-    material.segmentation_color[0] = (segmentation_color >> 0);
-    material.segmentation_color[1] = (segmentation_color >> 8);
-    material.segmentation_color[2] = (segmentation_color >> 16);
+  material.segmentation_id = geom.segid;
+
+  // Assume an emissive object is a selected object.
+  if (geom.emission > 0 && geom.emission == model->vis.global.glow) {
+    material.selected = true;
+    material.emissive = 0.0f;
   }
 
   // UvScale only applies to objects that don't have explicit UV coordinates
@@ -238,57 +190,49 @@ static void UpdateGeomMaterial(mjrRenderable* renderable, const mjvGeom& geom,
   // the programmatic UVs.
 
   if (material.color_texture) {
-    const bool tex_uniform = model->mat_texuniform[geom.matid];
-    if (mjrf_getSamplerType(material.color_texture) == mjTEXTURE_2D) {
+    bool tex_uniform;
+    float tex_repeat[2];
+    if (geom.texid >= 0) {
+      tex_uniform = geom.texuniform;
+      tex_repeat[0] = geom.texrepeat[0];
+      tex_repeat[1] = geom.texrepeat[1];
+    } else {
+      tex_uniform = model->mat_texuniform[geom.matid];
+      tex_repeat[0] = model->mat_texrepeat[(geom.matid * 2) + 0];
+      tex_repeat[1] = model->mat_texrepeat[(geom.matid * 2) + 1];
+    }
+    if (mjrf_getTextureSamplerType(material.color_texture) == mjTEXTURE_2D) {
       // For 2D textures, `tex_repeat` specifies how many times the texture
       // image is repeated. The `tex_uniform` flag determines if the repetition
       // is applied at in object space (false) or in world space (true).
-      float tex_repeat[2];
-      tex_repeat[0] = model->mat_texrepeat[(geom.matid * 2) + 0];
-      tex_repeat[1] = model->mat_texrepeat[(geom.matid * 2) + 1];
       material.uv_scale[0] = tex_repeat[0];
       material.uv_scale[1] = tex_repeat[1];
 
-      if (geom.dataid >= 0 && geom.type != mjGEOM_PLANE) {
-        if (geom.size[0] > mjMINVAL) {
-          material.uv_scale[0] /= geom.size[0];
-        }
-        if (geom.size[1] > mjMINVAL) {
-          material.uv_scale[1] /= geom.size[1];
-        }
-      }
-
-      if (tex_uniform) {
-        if (geom.size[0] > 0) {
-          material.uv_scale[0] *= geom.size[0];
-        }
-        if (geom.size[1] > 0) {
-          material.uv_scale[1] *= geom.size[1];
-        }
-      }
       const bool is_infinite_plane =
           geom.type == mjGEOM_PLANE && (geom.size[0] <= 0 || geom.size[1] <= 0);
       if (is_infinite_plane) {
-        // Infinite planes are scaled to match the tile size used by
-        // re-centering in engine_vis_visualize.c.
         const float plane_scale = static_cast<float>(mjMAXPLANEGRID) / 2.0f;
-        const float tile_size_x =
-            GetPlaneTileSize(model, geom.matid, tex_repeat[0]);
-        const float tile_size_y =
-            GetPlaneTileSize(model, geom.matid, tex_repeat[1]);
-        material.uv_scale[0] = 2.0f * plane_scale / tile_size_x;
-        material.uv_scale[1] = 2.0f * plane_scale / tile_size_y;
-      }
 
-      // We want to do the equivalent of:
-      //   mjr_setf4(splane, 0.5 * scl.x,  0, 0, -0.5);
-      //   mjr_setf4(tplane, 0, -0.5 * scl.y, 0, -0.5);
-      //   glTexGenfv(GL_S, GL_OBJECT_PLANE, splane);
-      //   glTexGenfv(GL_T, GL_OBJECT_PLANE, tplane);
-      material.uv_scale[0] = 0.5f * material.uv_scale[0];
-      material.uv_scale[1] = -0.5f * material.uv_scale[1];
-      material.uv_offset[0] = -0.5f;
-      material.uv_offset[1] = -0.5f;
+        const float dot_pos_axis_x = geom.pos[0] * geom.mat[0] +
+                                     geom.pos[1] * geom.mat[3] +
+                                     geom.pos[2] * geom.mat[6];
+        const float dot_pos_axis_y = geom.pos[0] * geom.mat[1] +
+                                     geom.pos[1] * geom.mat[4] +
+                                     geom.pos[2] * geom.mat[7];
+
+        material.uv_scale[0] *= plane_scale;
+        material.uv_scale[1] *= plane_scale;
+        // The vertex UVs in PlaneBuilder are u0 = 0.5*x + 0.5, v0 = -0.5*y + 0.5.
+        // To keep the world-space texture coordinate u = 0.5*worldX*texrepeat - 0.5
+        // independent of the snapped geomPos, uv_offset must compensate by 0.5*dot_pos.
+        material.uv_offset[0] =
+            (0.5f * dot_pos_axis_x - 0.5f * plane_scale) * tex_repeat[0] - 0.5f;
+        material.uv_offset[1] =
+            (-0.5f * dot_pos_axis_y - 0.5f * plane_scale) * tex_repeat[1] - 0.5f;
+      } else if (tex_uniform) {
+        material.uv_scale[0] *= (geom.size[0] ? geom.size[0] : 1.0f);
+        material.uv_scale[1] *= (geom.size[1] ? geom.size[1] : 1.0f);
+      }
     } else {
       // For cube maps, if `tex_uniform` is true, then scale the texture so that
       // it covers a 1x1 area of world space rather than the area of the object.
@@ -308,14 +252,15 @@ static void UpdateGeomMaterial(mjrRenderable* renderable, const mjvGeom& geom,
   mjrf_setRenderableMaterial(renderable, &material);
 }
 
-UniquePtr<mjrRenderable> CreateGeomRenderable(
-    const mjvGeom& geom, mjrfContext* ctx, ModelObjects* model_objs,
-    const float headpos[3], const mjtByte render_flags[mjNRNDFLAG]) {
-  mjrRenderableParams params;
-  mjr_defaultRenderableParams(&params);
+UniquePtr<mjrfRenderable> CreateGeomRenderable(const mjvGeom& geom,
+                                               mjrfContext* ctx,
+                                               ModelObjects* model_objs,
+                                               SceneObjects* scene_objs) {
+  mjrfRenderableParams params;
+  mjrf_defaultRenderableParams(&params);
   auto renderable = CreateRenderable(ctx, params);
-  PrepareGeomMeshes(renderable.get(), geom, model_objs);
-  UpdateGeomMaterial(renderable.get(), geom, model_objs, headpos, render_flags);
+  PrepareGeomMeshes(renderable.get(), geom, model_objs, scene_objs);
+  UpdateGeomMaterial(renderable.get(), geom, model_objs);
   return renderable;
 }
 }  // namespace mujoco

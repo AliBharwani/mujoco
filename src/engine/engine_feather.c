@@ -75,7 +75,7 @@ int mjf_wakeAll(const mjModel* m, mjData* d) {
   int woke = 0;
   for (int i = 0; i < m->ntree; i++) {
     if (d->tree_asleep[i] >= 0) {
-      woke += mj_wakeTree(d->tree_asleep, m->ntree, i, -(1 + mjMINAWAKE));
+      woke += mj_wakeIsland(d->tree_asleep, m->ntree, i, -(1 + mjMINAWAKE), "model edit", d->time);
     }
   }
   if (woke) mj_updateSleep(m, d);

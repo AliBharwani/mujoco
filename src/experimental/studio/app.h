@@ -35,6 +35,7 @@
 #include "experimental/platform/sim/step_control.h"
 #include "experimental/platform/ux/gui.h"
 #include "experimental/platform/ux/gui_spec.h"
+#include "experimental/platform/ux/imgui_widgets.h"
 #include "experimental/platform/ux/interaction.h"
 #include "experimental/platform/ux/picture_gui.h"
 #include "experimental/platform/ux/spec_editor.h"
@@ -64,6 +65,7 @@ class App {
   };
 
   explicit App(Config config);
+  ~App();
 
   // Loads an empty mjModel.
   void InitEmptyModel();
@@ -110,10 +112,11 @@ class App {
     int watch_index = 0;
     int camera_idx = platform::kTumbleCameraIdx;
     int key_idx = 0;
-    platform::GuiTheme theme = platform::GuiTheme::kLight;
+    platform::GuiTheme theme = platform::GuiTheme::kDark;
     float font_scale = 1.0f;
     int window_width = 0;
     int window_height = 0;
+    int nthread = 0;
 
     using Dict = std::unordered_map<std::string, std::string>;
     Dict ToDict() const;
@@ -124,14 +127,19 @@ class App {
   struct UiTempState {
     bool should_exit = false;
     bool first_frame = true;
+    bool update_threadpool = false;
 
     // Windows.
     bool help = false;
-    bool stats = false;
+    bool info = false;
     bool profiler = false;
+    bool profiler_show_iter = false;
     bool picture_in_picture = false;
     bool options_panel = true;
+    bool toolbar = false;
+    bool status_bar = false;
     bool inspector_panel = true;
+    bool editor_panel = false;
     bool full_screen = false;
     bool style_editor = false;
     bool imgui_demo = false;
@@ -196,9 +204,12 @@ class App {
 
   void ResetPhysics();
   void UpdatePhysics();
+  void PreStep(const mjModel* m, mjData* d);
+  void PostStep(const mjModel* m, mjData* d);
 
   void LoadSettings();
   void SaveSettings();
+  void ApplyWindowStateStorage();
 
   void LoadHistory(int offset);
 
@@ -209,8 +220,6 @@ class App {
   void HandleKeyboardEvents();
 
   void ProcessPendingLoads();
-
-  void MoveCamera(platform::CameraMotion motion, mjtNum reldx, mjtNum reldy);
 
   void SetupTheme(platform::GuiTheme theme);
 
@@ -224,8 +233,6 @@ class App {
   void SpecExplorerGui();
   void SpecEditorGui();
 
-  float GetExpectedLabelWidth();
-
   mjSpec* spec() { return model_holder_->spec(); }
   mjModel* model() { return model_holder_->model(); }
   mjData* data() { return model_holder_->data(); }
@@ -235,11 +242,17 @@ class App {
 
   std::string app_title_;
   std::string ini_path_;
+  // Window state storage (e.g. collapsing header open/closed state), keyed
+  // "<window name>/<id>", which ImGui does not serialize. Entries stay
+  // pending until their window is first created.
+  platform::KeyValues window_state_storage_;
   std::string model_name_;  // Used if model_kind_ is kModelFromBuffer.
   std::string model_path_;
   std::string load_error_;
   std::string step_error_;
   std::string edit_error_;
+  platform::StepControl::PauseState last_pause_state_ =
+      platform::StepControl::PauseState::kNormalPaused;
 
   std::optional<std::string> pending_load_;
   std::function<void()> pending_op_;
@@ -254,6 +267,7 @@ class App {
   platform::StepControl step_control_;
   platform::SimProfiler profiler_;
   platform::SimHistory sim_history_;
+  platform::SimulationTimelineState timeline_;
   platform::SpecEditor spec_editor_;
   std::vector<std::string> search_paths_;
   std::vector<std::byte> pixels_;
@@ -261,6 +275,7 @@ class App {
   mjvCamera camera_;
   mjvPerturb perturb_;
   mjvOption vis_options_;
+  mjvScene plugin_scene_;
 
   UiState ui_;
   UiTempState tmp_;

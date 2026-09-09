@@ -24,10 +24,13 @@
 // mjvOption, etc. But, some functions take additional arguments as needed.
 
 #include <array>
+#include <functional>
+#include <string>
 #include <vector>
 
 #include <imgui.h>
 #include <mujoco/mujoco.h>
+#include "experimental/platform/sim/sim_history.h"
 #include "experimental/platform/sim/sim_profiler.h"
 #include "experimental/platform/sim/step_control.h"
 
@@ -39,6 +42,9 @@ enum class GuiTheme {
   kDark,
   kClassic,
 };
+
+// Render a section header with custom, visually-balanced smaller expand/collapse arrow.
+bool SectionHeader(const char* label, ImGuiTreeNodeFlags flags = 0, float arrow_scale = 0.55f);
 
 // Updates the ImGui internal style state to match the requested theme.
 void SetupTheme(GuiTheme theme);
@@ -58,22 +64,20 @@ void RescaleDock(float ratio);
 //       or manipulating mjData elements (e.g. ControlsGui).
 //   "Explorer": secondary tab connected to the Inspector; designed for
 //       displaying the tree of mjSpec elements.
-//   "Stats": resizable section below the options; designed for displaying
-//       basic simulation statistics (e.g. StatsGui); hidden by default.
 //   "Properties": resizable section below the explorer; designed for displaying
 //       properties of mjSpec elements (e.g. BodyPropertiesGui); hidden by
 //       default.
 //
 // Returns the size and position of the remaining workspace area which can then
 // be used to place additional elements (e.g. floating charts).
-ImVec4 ConfigureDockingLayout();
+ImVec4 ConfigureDockingLayout(bool show_toolbar = true, bool show_status_bar = false);
 
 // logarithmically spaced real-time slow-down coefficients (percent)
 // clang-format off
 static constexpr std::array<const char*, 31> kPercentRealTime = {
-"100.0 ", " 80.0 ", " 66.0 ", " 50.0 ", " 40.0 ", " 33.0 ", " 25.0 ", " 20.0 ", " 16.0 ", " 13.0 ",
-" 10.0 ", "  8.0 ", "  6.6 ", "  5.0 ", "  4.0 ", "  3.3 ", "  2.5 ", "  2.0 ", "  1.6 ", "  1.3 ",
-"  1.0 ", "  0.8 ", "  0.7 ", "  0.5 ", "  0.4 ", "  0.33", "  0.25", "  0.2 ", "  0.16", "  0.13",
+"100.0 ", " 80.0 ", " 63.0 ", " 50.0 ", " 40.0 ", " 32.0 ", " 25.0 ", " 20.0 ", " 16.0 ", " 13.0 ",
+" 10.0 ", "  8.0 ", "  6.3 ", "  5.0 ", "  4.0 ", "  3.2 ", "  2.5 ", "  2.0 ", "  1.6 ", "  1.3 ",
+"  1.0 ", "  0.8 ", "  0.63", "  0.5 ", "  0.4 ", "  0.32", "  0.25", "  0.2 ", "  0.16", "  0.13",
 "  0.1 ",
 };
 // clang-format on
@@ -81,8 +85,56 @@ static constexpr std::array<const char*, 31> kPercentRealTime = {
 // UX for controlling the simulation stepping. `speed_index` is an index into
 // kPercentRealTime, an array of available speeds (indices in range [0, 30] map
 // to real-time percentages in range [100%, 0.1%]).
-void StepControlGui(const mjModel* model, StepControl* step_control,
-                    int& speed_index);
+void StepControlGui(StepControl* step_control, int& speed_index);
+
+// Sets the simulation speed index and updates the StepControl object.
+void SetSpeedIndex(StepControl* step_control, int& speed_index,
+                   int request_idx);
+
+// Loads history frame `index` into `data`, pausing the simulation. A no-op if
+// the requested frame is empty.
+void LoadHistoryFrame(SimHistory& history, StepControl& step_control,
+                      const mjModel* model, mjData* data, int index);
+
+// Persistent state of the timeline scrubber: the time at the head of history,
+// the (monotonically-growing) label box widths, and the current drag.
+struct SimulationTimelineState {
+  double sim_head_time = 0.0;
+  float lh_width = 0.0f;
+  float rh_width = 0.0f;
+  bool scrubber_active = false;
+  float scrubber_grab_offset = 0.0f;
+};
+
+// The timeline scrubber row: a spine with a draggable knob that scrubs through
+// the simulation history. Used by the Simulation panel and the toolbar.
+void TimelineScrubberGui(const mjModel* model, mjData* data,
+                         StepControl& step_control, SimHistory& history,
+                         SimulationTimelineState& timeline);
+
+// Everything the Simulation panel reads or drives. All pointers are owned by
+// the caller and edited in place; the callbacks perform application actions the
+// panel cannot do on its own.
+struct SimulationGuiContext {
+  mjModel* model = nullptr;  // non-const: saving a keyframe writes to the model
+  mjData* data = nullptr;
+  StepControl* step_control = nullptr;
+  SimHistory* history = nullptr;
+  SimulationTimelineState* timeline = nullptr;
+  int* speed_index = nullptr;
+  int* key_idx = nullptr;
+  int* nthread = nullptr;
+  bool* update_threadpool = nullptr;
+  std::function<void()> reset;   // reset the physics state
+  std::function<void()> reload;  // reload the model
+  std::function<void()> align;   // recenter the camera on the model
+};
+
+// The Simulation panel: reset / reload / align, a pause-run toggle, the speed
+// slider, the history scrubber, keyframe controls and the thread count. This is
+// a reusable view over the platform simulation objects; it holds no application
+// state of its own.
+void SimulationGui(const SimulationGuiContext& ctx);
 
 // UX for selecting the GUI theme.
 bool ThemeSelectGui(GuiTheme* theme, const ImVec2& size = ImVec2(0, 0));
@@ -92,6 +144,10 @@ bool LabelSelectionGui(mjvOption* opts);
 
 // UX for selecting the visualization frame option.
 bool FrameSelectionGui(mjvOption* opts);
+
+// Get the display name for a camera given its index.
+std::string GetCameraName(const mjModel* model, const mjvCamera& camera,
+                          int index);
 
 // UX for selecting the camera.
 bool CameraSelectionGui(const mjModel* model, mjData* data, mjvCamera& camera,
@@ -116,7 +172,7 @@ void VisualizationGui(mjModel* model, mjvOption* vis_options, mjvCamera* camera,
                       float min_width);
 
 // UX for visualizing actuator controls data in mjData.
-void ControlsGui(const mjModel* model, const mjData* data,
+void ControlsGui(const mjModel* model, mjData* data,
                  const mjvOption* vis_options);
 
 // UX for visualizing joint data in mjData.
@@ -138,8 +194,7 @@ void WatchGui(const mjModel* model, const mjData* data, char* field_name,
 
 // UX for controlling noise parameters which can then be applied to the
 // simulation via StepControl::SetNoiseParameters / StepControl::InjectNoise.
-void NoiseGui(const mjModel* model, const mjData* data, float& noise_scale,
-              float& noise_rate);
+void NoiseGui(StepControl* step_control);
 
 // UX for the solver convergence chart.
 void ConvergenceGui(const mjModel* model, mjData* data,
@@ -150,11 +205,11 @@ void CountsGui(const mjModel* model, mjData* data,
                ImVec2 plot_size = ImVec2(-1, 0));
 
 // UX for Profiler panel combining Solver and Performance metrics.
-void ProfilerGui(const mjModel* model, mjData* data, SimProfiler* profiler);
+void ProfilerGui(const mjModel* model, mjData* data, SimProfiler* profiler, bool show_iter);
 
 // UX for displaying basic simulation information. Note that the pause state and
 // FPS needs to be tracked by the caller and passed here to be displayed.
-void StatsGui(const mjModel* model, const mjData* data, bool paused, float fps);
+void InfoGui(const mjModel* model, const mjData* data, bool paused, float fps);
 
 }  // namespace mujoco::platform
 

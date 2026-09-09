@@ -19,11 +19,11 @@ import dataclasses
 import math
 from typing import Tuple, Union, cast
 
+from mujoco.codegen import code_builder
 from introspect import ast_nodes
 from introspect import functions as introspect_functions
 from introspect import structs as introspect_structs
 
-from wasm.codegen.generators import code_builder
 from wasm.codegen.generators import common
 from wasm.codegen.generators import constants
 
@@ -80,7 +80,7 @@ def _generate_field_data(
     # Note: Manually handled MjModel fields are special cased so that a
     # by-reference embind return value policy is used.
     return WrappedFieldData(
-        typename=_get_field_struct_type(f, s),
+        typename=_get_field_struct_type(f, s),  # pyrefly: ignore[bad-argument-type]
         declaration=f"// {f.name} field is handled manually in template file struct declaration",  # pylint: disable=line-too-long
         binding=_get_property_binding(f, w, reference=(w == "MjModel")),
     )
@@ -115,7 +115,7 @@ def _generate_field_data(
 
     return WrappedFieldData(
         declaration=builder.to_string(),
-        typename=_get_field_struct_type(f, s),
+        typename=_get_field_struct_type(f, s),  # pyrefly: ignore[bad-argument-type]
         binding=_get_property_binding(f, w, setter=True, reference=True),
         is_primitive_or_fixed_size=True,
     )
@@ -123,7 +123,7 @@ def _generate_field_data(
   elif isinstance(f.type, ast_nodes.ValueType) and f.type.name.startswith("mj"):
     return WrappedFieldData(
         declaration=f"{common.capitalize(f.type.name)} {f.name};",
-        typename=_get_field_struct_type(f, s),
+        typename=_get_field_struct_type(f, s),  # pyrefly: ignore[bad-argument-type]
         binding=_get_property_binding(f, w, setter=False, reference=True),
         ptr_initialization=f"{f.name}(&ptr_->{f.name})",
         ptr_copy_reset=f"{f.name}.set(&ptr_->{f.name});",
@@ -134,9 +134,9 @@ def _generate_field_data(
     anonymous_struct_name = _get_field_struct_type(f, s)
     return WrappedFieldData(
         binding=_get_property_binding(f, w, setter=False, reference=True),
-        typename=anonymous_struct_name,
+        typename=anonymous_struct_name,  # pyrefly: ignore[bad-argument-type]
         declaration=(
-            f"{common.wrapped_struct_name(anonymous_struct_name)} {f.name};"
+            f"{common.wrapped_struct_name(anonymous_struct_name)} {f.name};"  # pyrefly: ignore[bad-argument-type]
         ),
         ptr_initialization=f"{f.name}(&ptr_->{f.name})",
         ptr_copy_reset=f"{f.name}.set(&ptr_->{f.name});",
@@ -173,7 +173,7 @@ def _generate_field_data(
 
       return WrappedFieldData(
           declaration=builder.to_string(),
-          typename=_get_field_struct_type(f, s),
+          typename=_get_field_struct_type(f, s),  # pyrefly: ignore[bad-argument-type]
           binding=_get_property_binding(f, w),
           is_primitive_or_fixed_size=True,
       )
@@ -183,7 +183,7 @@ def _generate_field_data(
               f"std::vector<{common.capitalize(inner_type_name)}> {f.name};"
           ),
           ptr_initialization=f"{f.name}(&ptr_->{f.name})",
-          typename=_get_field_struct_type(f, s),
+          typename=_get_field_struct_type(f, s),  # pyrefly: ignore[bad-argument-type]
           binding=_get_property_binding(f, w, reference=True),
       )
 
@@ -207,7 +207,7 @@ def _generate_field_data(
           builder.line(f"*(ptr_->{f.name}) = value;")
       return WrappedFieldData(
           declaration=builder.to_string(),
-          typename=_get_field_struct_type(f, s),
+          typename=_get_field_struct_type(f, s),  # pyrefly: ignore[bad-argument-type]
           binding=_get_property_binding(f, w, setter=True, reference=True),
       )
 
@@ -225,8 +225,38 @@ def _generate_field_data(
         builder.line(f"return {ptr_field_expr_vec};")
       return WrappedFieldData(
           declaration=builder.to_string(),
-          typename=_get_field_struct_type(f, s),
+          typename=_get_field_struct_type(f, s),  # pyrefly: ignore[bad-argument-type]
           binding=_get_property_binding(f, w, setter=False, reference=True),
+      )
+
+    # Case 2.5: const char* without array_extent (C strings like body, func).
+    elif (
+        inner_type_name == "char"
+        and not is_dynamically_sized
+    ):
+      builder = code_builder.CodeBuilder()
+      if f.type.inner_type.is_const:  # pyrefly: ignore[missing-attribute]
+        with builder.function(f"std::string {f.name}() const"):
+          builder.line(
+              f'return ptr_->{f.name} ? std::string(ptr_->{f.name}) : "";'
+          )
+      else:
+        with builder.function(f"std::string {f.name}() const"):
+          builder.line(
+              f'return ptr_->{f.name} ? std::string(ptr_->{f.name}) : "";'
+          )
+        with builder.function(f"void set_{f.name}(const std::string& value)"):
+          with builder.block(f"if (ptr_->{f.name})"):
+            builder.line(
+                f"std::strncpy(ptr_->{f.name}, value.c_str(),"
+                f" sizeof(ptr_->{f.name}));"
+            )
+      return WrappedFieldData(
+          declaration=builder.to_string(),
+          typename=_get_field_struct_type(f, s),  # pyrefly: ignore[bad-argument-type]
+          binding=_get_property_binding(
+              f, w, setter=not f.type.inner_type.is_const, reference=True
+          ),
       )
 
     # Case 3: Non-dynamically sized pointer fields to other structs.
@@ -243,7 +273,7 @@ def _generate_field_data(
       )
       return WrappedFieldData(
           declaration=f"{wrapper_field_name} {f.name};",
-          typename=_get_field_struct_type(f, s),
+          typename=_get_field_struct_type(f, s),  # pyrefly: ignore[bad-argument-type]
           binding=_get_property_binding(f, w, setter=False, reference=True),
           ptr_initialization=f"{f.name}(ptr_->{f.name})",
       )
@@ -254,7 +284,7 @@ def _generate_field_data(
       ptr_field_expr = f"ptr_->{f.name}"
       array_size_str = ""
       if is_dynamically_sized:
-        array_size_str = parse_array_extent(f.array_extent, w, f.name)
+        array_size_str = parse_array_extent(f.array_extent, w, f.name)  # pyrefly: ignore[bad-argument-type]
       elif f.name in constants.BYTE_FIELDS.keys():
         # For byte fields, we need to cast the pointer to uint8_t*
         # so embind can correctly interpret the memory view
@@ -273,7 +303,7 @@ def _generate_field_data(
         )
       return WrappedFieldData(
           declaration=builder.to_string(),
-          typename=_get_field_struct_type(f, s),
+          typename=_get_field_struct_type(f, s),  # pyrefly: ignore[bad-argument-type]
           binding=_get_property_binding(f, w),
       )
 
@@ -681,7 +711,7 @@ def _get_anonymous_struct_field(
       ),
       None,
   )
-  return target_field
+  return target_field  # pyrefly: ignore[bad-return]
 
 
 def _get_field_struct_type(

@@ -17,7 +17,7 @@
 #include <cstddef>
 #include <cstring>
 #include <memory>
-#include <span>
+#include <span>  // NOLINT
 #include <string_view>
 
 #include <mujoco/mujoco.h>
@@ -89,6 +89,11 @@ void ModelHolder::PostInit() {
       SetLoadError(mjs_getError(spec_));
       return;
     }
+    int num_warnings = mjs_numWarnings(spec_);
+    for (int i = 0; i < num_warnings; ++i) {
+      if (!warning_.empty()) warning_ += '\n';
+      warning_ += mjs_getWarning(spec_, i);
+    }
   }
   data_ = mj_makeData(model_);
   if (!data_) {
@@ -117,7 +122,9 @@ void ModelHolder::InitFromBuffer(std::span<const std::byte> buffer,
                                  std::string_view filename) {
   if (content_type == "text/xml") {
     const char* ptr = reinterpret_cast<const char*>(buffer.data());
-    spec_ = mj_parseXMLString(ptr, nullptr, error_, sizeof(error_));
+    // Pass &vfs_ so any archive mounts created when parsing attached
+    // sub-models persist in the model holder's VFS for compilation.
+    spec_ = mj_parseXMLString(ptr, &vfs_, error_, sizeof(error_));
   } else if (content_type == "application/mjb") {
     model_ = mj_loadModelBuffer(buffer.data(), buffer.size());
   } else if (content_type == "application/zip") {

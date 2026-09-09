@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <random>
 #include <string>
 #include <vector>
@@ -24,25 +26,40 @@
 
 namespace mujoco::studio {
 
+inline constexpr char kObjectLauncherName[] = "ObjectLauncher";
+
 class ObjectLauncher {
  public:
   ObjectLauncher() : rng_(std::random_device{}()) {}
 
   void UpdateGui() {
-    using platform::ImGui_Input;
+    using platform::ImGui_ResetButton;
+    using platform::ImGui_SliderLog;
 
-    ImGui::Checkbox("Enable Key Binding (Ctrl+Shift+Enter)", &enabled_);
-    ImGui_Input("Size", &size_, {0.01f, 1.0f, 0.01, 0.1});
-    ImGui_Input("Speed", &speed_, {0.01f, 100.0f, 0.1, 1.0});
-    ImGui_Input("Mass", &mass_, {0.01f, 100.0f, 0.01, 0.1});
-    ImGui_Input("Life", &lifetime_, {0.0f, 60.0f, 0.1, 1.0});
+    constexpr mjtNum kLifeDefault = 2.0;
+    ImGui_SliderLog("Size", &size_, size_seed_ * 0.1, size_seed_ * 10);
+    ImGui::BeginDisabled(size_ == size_seed_);
+    if (ImGui_ResetButton("Size")) size_ = size_seed_;
+    ImGui::EndDisabled();
+    ImGui_SliderLog("Speed", &speed_, speed_seed_ * 0.1, speed_seed_ * 10);
+    ImGui::BeginDisabled(speed_ == speed_seed_);
+    if (ImGui_ResetButton("Speed")) speed_ = speed_seed_;
+    ImGui::EndDisabled();
+    ImGui_SliderLog("Mass", &mass_, mass_seed_ * 0.1, mass_seed_ * 100);
+    ImGui::BeginDisabled(mass_ == mass_seed_);
+    if (ImGui_ResetButton("Mass")) mass_ = mass_seed_;
+    ImGui::EndDisabled();
+    ImGui_SliderLog("Life", &lifetime_, 0.5, 50.0);
+    ImGui::BeginDisabled(lifetime_ == kLifeDefault);
+    if (ImGui_ResetButton("Life")) lifetime_ = kLifeDefault;
+    ImGui::EndDisabled();
 
     int shape = type_ == mjGEOM_BOX ? 0 : 1;
     const char* names[] = {"Box", "Sphere"};
     ImGui::Combo("Shape", &shape, names, 2);
     type_ = shape == 0 ? mjGEOM_BOX : mjGEOM_SPHERE;
 
-    if (ImGui::Button("Launch", ImVec2(-1.0f, 0.0f))) {
+    if (ImGui::Button("Launch (Enter)", ImVec2(-1.0f, 0.0f))) {
       active_ = true;
     }
 
@@ -54,23 +71,54 @@ class ObjectLauncher {
   }
 
   void HandleKeyboardEvent() {
-    if (enabled_) active_ = true;
+    // The key binding is armed only while the plugin window is open.
+    platform::ForEachPlugin<platform::GuiPlugin>([this](auto* gui) {
+      if (gui->active && !std::strcmp(gui->name, kObjectLauncherName)) {
+        active_ = true;
+      }
+    });
+  }
+
+  void OnModelLoaded(const mjModel* model) {
+    if (!model) return;
+    // Geometric mean of two length estimates -- the mean geom size, and the
+    // length implied by the mean mass at density 1000 -- so a bad meansize or
+    // meanmass only half-poisons the seed (they agree for a consistent model).
+    const mjtNum len_size = model->stat.meansize;
+    const mjtNum len_mass = std::cbrt(model->stat.meanmass / 1000.0);
+    mjtNum len = mju_sqrt(len_size * len_mass);
+    if (!(len > 0)) len = len_size > 0 ? len_size : len_mass;
+    const mjtNum size = 0.5 * len;
+    Seed(size, &size_, &size_seed_);
+    // Mass giving the default box (volume (2*size)^3) density 1000, MuJoCo's
+    // default geom density. Units are unspecified, so 1000 is just a convention.
+    const mjtNum box_volume = 8.0 * size * size * size;
+    Seed(1000.0 * box_volume, &mass_, &mass_seed_);
+    const mjtNum gravity = mju_norm3(model->opt.gravity);
+    const mjtNum g = gravity > mjMINVAL ? gravity : 9.81;
+    // Ballistic scale: the launch arc spans a few model extents.
+    Seed(3.0 * mju_sqrt(model->stat.extent * g), &speed_, &speed_seed_);
   }
 
   bool UpdateSpecPreCompile(mjSpec* spec, const mjModel* model,
                             const mjData* data, const mjvCamera* camera) {
-    // Remove expired objects.
+    // Objects live on [creation_time, expiration]: drop them when the lifetime
+    // elapses, or when the sim rewinds before launch (so a reset clears them).
     auto it = std::remove_if(
         objects_.begin(), objects_.end(), [&](const ObjectInfo& o) {
-          const bool expired =
-              o.body_id >= 0 && o.expiration != 0 && o.expiration < data->time;
-          if (expired) {
+          if (o.body_id < 0) {
+            return false;  // not yet compiled into the model
+          }
+          const bool expired = o.expiration != 0 && o.expiration < data->time;
+          const bool rewound = data->time < o.creation_time;
+          const bool remove = expired || rewound;
+          if (remove) {
             mjsBody* body = mjs_findBody(spec, o.name.c_str());
             if (body) {
               mjs_delete(spec, body->element);
             }
           }
-          return expired;
+          return remove;
         });
     if (it != objects_.end()) {
       objects_.erase(it, objects_.end());
@@ -91,13 +139,12 @@ class ObjectLauncher {
 
     ObjectInfo& object = objects_.emplace_back();
     object.name = "projectile" + std::to_string(counter_++);
-    ;
+    object.creation_time = data->time;
     object.expiration = data->time + lifetime_;
 
     mjtNum pos[3];
     mjtNum dir[3];
-    mjtNum up[3];
-    mjv_cameraFrame(pos, dir, up, nullptr, data, camera);
+    mjv_cameraFrame(pos, dir, nullptr, nullptr, data, camera);
     mjs_setName(body->element, object.name.c_str());
 
     joint->type = mjJNT_FREE;
@@ -115,10 +162,9 @@ class ObjectLauncher {
     geom->rgba[1] = std::uniform_real_distribution<float>(0.3f, 1.0f)(rng_);
     geom->rgba[2] = std::uniform_real_distribution<float>(0.3f, 1.0f)(rng_);
     geom->rgba[3] = 1.0;
-    // Launch it slightly upwards to get a nice arc.
-    launch_vel_[0] = (dir[0] * speed_) + up[0];
-    launch_vel_[1] = (dir[1] * speed_) + up[1];
-    launch_vel_[2] = (dir[2] * speed_) + up[2];
+    launch_vel_[0] = dir[0] * speed_;
+    launch_vel_[1] = dir[1] * speed_;
+    launch_vel_[2] = dir[2] * speed_;
     return true;
   }
 
@@ -153,21 +199,31 @@ class ObjectLauncher {
   }
 
  private:
+  // Update value with the new seed, unless the user has edited it.
+  static void Seed(mjtNum seed, mjtNum* value, mjtNum* prev_seed) {
+    if (seed <= 0 || !std::isfinite(seed)) return;
+    if (*value == *prev_seed) *value = seed;
+    *prev_seed = seed;
+  }
+
   struct ObjectInfo {
     std::string name;
     int body_id = -1;
+    mjtNum creation_time = 0;
     mjtNum expiration = 0;
     bool launched = false;
   };
 
   std::mt19937 rng_;
   int counter_ = 0;
-  bool enabled_ = false;
   bool active_ = false;
-  mjtNum size_ = 0.13365;
+  mjtNum size_ = 0.1;
   mjtNum speed_ = 10.0;
   mjtNum mass_ = 10.0;
-  mjtNum lifetime_ = 5.0;
+  mjtNum lifetime_ = 2.0;
+  mjtNum size_seed_ = 0.1;
+  mjtNum speed_seed_ = 10.0;
+  mjtNum mass_seed_ = 10.0;
   mjtGeom type_ = mjGEOM_BOX;
   mjtNum launch_vel_[3] = {0, 0, 0};
   std::vector<ObjectInfo> objects_;
@@ -182,7 +238,7 @@ mjPLUGIN_LIB_INIT(object_launcher) {
 
   mujoco::platform::GuiPlugin gui;
   gui.data = &plugin;
-  gui.name = "ObjectLauncher";
+  gui.name = mujoco::studio::kObjectLauncherName;
   gui.update = [](mujoco::platform::GuiPlugin* self) {
     auto* plugin = static_cast<mujoco::studio::ObjectLauncher*>(self->data);
     plugin->UpdateGui();
@@ -191,17 +247,28 @@ mjPLUGIN_LIB_INIT(object_launcher) {
 
   mujoco::platform::KeyHandlerPlugin key_handler;
   key_handler.data = &plugin;
-  key_handler.name = "ObjectLauncher";
-  key_handler.key_chord = ImGuiKey_Enter | ImGuiMod_Ctrl | ImGuiMod_Shift;
+  key_handler.name = mujoco::studio::kObjectLauncherName;
+  key_handler.key_chord = ImGuiKey_Enter;
   key_handler.on_key_pressed = [](mujoco::platform::KeyHandlerPlugin* self) {
     auto* plugin = static_cast<mujoco::studio::ObjectLauncher*>(self->data);
     plugin->HandleKeyboardEvent();
   };
   mujoco::platform::RegisterPlugin(key_handler);
 
+  mujoco::platform::ModelPlugin model_plugin;
+  model_plugin.data = &plugin;
+  model_plugin.name = mujoco::studio::kObjectLauncherName;
+  model_plugin.post_model_loaded = [](mujoco::platform::ModelPlugin* self,
+                                      const mjModel* model,
+                                      const char* model_path) {
+    auto* plugin = static_cast<mujoco::studio::ObjectLauncher*>(self->data);
+    plugin->OnModelLoaded(model);
+  };
+  mujoco::platform::RegisterPlugin(model_plugin);
+
   mujoco::platform::SpecEditorPlugin spec_editor;
   spec_editor.data = &plugin;
-  spec_editor.name = "ObjectLauncher";
+  spec_editor.name = mujoco::studio::kObjectLauncherName;
   spec_editor.pre_compile = [](mujoco::platform::SpecEditorPlugin* self,
                                mjSpec* spec, const mjModel* model,
                                const mjData* data, const mjvCamera* camera) {

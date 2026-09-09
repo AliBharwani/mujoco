@@ -15,7 +15,6 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
-#include <filesystem>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -41,6 +40,7 @@
 #include <mujoco/mjspec.h>
 #include <mujoco/mujoco.h>
 #include "user/user_resource.h"
+#include "user/user_util.h"
 
 static void mjPRINTFLIKE(3, 4)
     SetError(char* error, int error_sz, const char* format, ...) {
@@ -61,7 +61,8 @@ class ZipArchiveProvider : public mjpResourceProvider {
  public:
   ZipArchiveProvider(std::string name, const void* buffer, int nbuffer,
                      char* error, int error_sz)
-      : name_(std::move(name)), buffer_((char*)buffer, (char*)buffer + nbuffer) {
+      : name_(mujoco::user::FilePath(name).Str()),
+        buffer_((char*)buffer, (char*)buffer + nbuffer) {
     mjp_defaultResourceProvider(this);
 
     std::memset(&archive_, 0, sizeof(archive_));
@@ -86,17 +87,33 @@ class ZipArchiveProvider : public mjpResourceProvider {
       files_[stat.m_filename] = FileInfo{i, size, {}};
     }
 
-    // Look for the root XML model in the archive. First look for an XML file
-    // with the same name as the archive itself. Failing that, look for an XML
-    // file within a subdirectory with the same name as the archive.
-    const std::filesystem::path path(name_);
-    root_model_ = (path / path.stem()).string() + ".xml";
-    if (!Contains(root_model_)) {
-      root_model_ = (path / path.stem() / path.stem()).string() + ".xml";
-      if (!Contains(root_model_)) {
-        SetError(error, error_sz, "Zip error: no root XML file found.");
-        return;
+    // Look for the root XML model in the archive. We try the following
+    // locations:
+    // 1. [archive_name].xml
+    // 2. [archive_name]/[archive_name].xml
+    // 3. model.xml
+    // 4. [archive_name]/model.xml
+    const mujoco::user::FilePath path(name_);
+    const std::string stem = path.StripExt().StripPath().Str();
+    std::vector<std::string> candidates = {
+        name_ + "/" + stem + ".xml",
+        name_ + "/" + stem + "/" + stem + ".xml",
+        name_ + "/model.xml",
+        name_ + "/" + stem + "/model.xml",
+    };
+
+    bool found = false;
+    for (const auto& candidate : candidates) {
+      if (Contains(candidate)) {
+        root_model_ = candidate;
+        found = true;
+        break;
       }
+    }
+
+    if (!found) {
+      SetError(error, error_sz, "Zip error: no root XML file found.");
+      return;
     }
 
     // Setup mjpResourceProvider callbacks.
@@ -110,12 +127,14 @@ class ZipArchiveProvider : public mjpResourceProvider {
     };
     open = [](mjResource* resource) {
       ZipArchiveProvider* self = (ZipArchiveProvider*)resource->provider;
-      const bool found = self->Contains(resource->name);
+      const std::string path = mujoco::user::FilePath(resource->name).Str();
+      const bool found = self->Contains(path);
       return found ? 1 : 0;
     };
     read = [](mjResource* resource, const void** buffer) {
       ZipArchiveProvider* self = (ZipArchiveProvider*)resource->provider;
-      std::span<char> bytes = self->Read(resource->name);
+      const std::string path = mujoco::user::FilePath(resource->name).Str();
+      std::span<char> bytes = self->Read(path);
       *buffer = bytes.data();
       return static_cast<int>(bytes.size());
     };
@@ -138,20 +157,28 @@ class ZipArchiveProvider : public mjpResourceProvider {
 
   // Returns true if the archive contains a file with the given name/path.
   bool Contains(std::string_view name) const {
+    // The searched name should be longer than the archive name, it should
+    // start with the archive name and have a separator after the archive name.
+    if (name.size() <= name_.size() || !name.starts_with(name_) ||
+        name[name_.size()] != '/') {
+      return false;
+    }
+
     const std::string_view filename = name.substr(name_.size() + 1);
-    return files_.find(filename.data()) != files_.end();
+    // Explicitly construct std::string since filename is a string_view slice
+    // and not null-terminated.
+    return files_.find(std::string(filename)) != files_.end();
   }
 
   // Reads the contents of the file with the given name/path. The contents are
   // cached internally so that subsequent reads for the same file do not need to
   // re-read the file from the archive.
   std::span<char> Read(const std::string& name) {
-    const std::string filename = name.substr(name_.size() + 1);
-    auto it = files_.find(filename);
-    if (it == files_.end()) {
+    if (!Contains(name)) {
       return {};
     }
-
+    const std::string filename = name.substr(name_.size() + 1);
+    auto it = files_.find(filename);
     FileInfo& info = it->second;
 
     // Lazily read and store the file contents from the archive.
@@ -224,9 +251,14 @@ mjPLUGIN_LIB_INIT(mjz_decoder) {
     if (size <= 0) {
       return nullptr;
     }
-    char error[1024];
-    return ParseZipBuffer(buffer, size, resource->name, const_cast<mjVFS*>(vfs),
-                          error, sizeof(error));
+    char error[1024] = "";
+    mjSpec* spec = ParseZipBuffer(buffer, size, resource->name,
+                                  const_cast<mjVFS*>(vfs), error,
+                                  sizeof(error));
+    if (!spec && error[0]) {
+      mju_warning("%s", error);
+    }
+    return spec;
   };
   mjp_registerDecoder(&decoder);
 }
