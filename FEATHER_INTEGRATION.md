@@ -2,6 +2,18 @@
 
 `mjfeather.h` adds an API without changing `mjModel`, `mjData` or `mjContact`.
 
+- `mjf_enableTimers(1)` installs a native monotonic wall clock in milliseconds
+  (`CLOCK_MONOTONIC` on Linux, `QueryPerformanceCounter` on Windows). It is opt-in
+  and process-global: it replaces any Python `set_mjcb_time` callback; disabling
+  sets NULL, not the previous callback. Enable/disable only when all simulations
+  and workers are idle. It does not read, clear or otherwise edit any `mjData`.
+  Upstream call counts advance even when the callback is NULL; only durations
+  stop accumulating. Consumers must clear both fields at measurement boundaries.
+  Timers overlap: STEP contains FORWARD/ADVANCE, POSITION contains its sub-stages,
+  and COLLISION contains BROAD/NARROW. Inverse is inactive in ordinary forward
+  stepping. Omitted work/timer overhead means an arbitrary sub-stage sum need not
+  equal STEP. Wall time includes descheduling; measure overhead before leaving it
+  on in production collection. No training or Unity call site enables it by default.
 - `mjf_buildId` identifies native source + declared dependency pins (including dirty
   source files). `mjf_layout` checks struct sizes and selected field offsets before
   a consumer allocates or dereferences them. Binary hashes/toolchain identity are

@@ -26,6 +26,13 @@ extern "C" {
 MJAPI const char* mjf_buildId(void);
 MJAPI int mjf_layout(const char* type, const char* field);
 
+// Opt-in process-global monotonic wall clock in milliseconds for mjData.timer.
+// Nonzero replaces mjcb_time (including Python callbacks); zero sets it to NULL,
+// not the previous callback. Call only while all simulations/workers are idle.
+// Does not clear timers: durations stop accumulating when disabled, but upstream
+// timer call counts still advance. Reading/clearing mjData.timer is caller-owned.
+MJAPI void mjf_enableTimers(int enable);
+
 // Wake all sleeping islands without changing positions, velocities or applied forces.
 MJAPI int mjf_wakeAll(const mjModel* m, mjData* d);
 

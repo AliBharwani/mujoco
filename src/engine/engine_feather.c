@@ -4,12 +4,52 @@
 #include <stddef.h>
 #include <string.h>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <time.h>
+#endif
+
 #include <mujoco/mjfeather.h>
 #include <mujoco/mujoco.h>
 #include "engine/engine_sleep.h"
 #include "build_id.h"
 
 const char* mjf_buildId(void) { return MJ_FEATHER_BUILD_ID; }
+
+#ifdef _WIN32
+static mjtNum timer_tick_ms;
+
+static mjtNum timerMilliseconds(void) {
+  LARGE_INTEGER ticks;
+  if (!QueryPerformanceCounter(&ticks)) {
+    mju_error("Feather timer: QueryPerformanceCounter failed");
+  }
+  return (mjtNum)ticks.QuadPart * timer_tick_ms;
+}
+#else
+static mjtNum timerMilliseconds(void) {
+  struct timespec now;
+  if (clock_gettime(CLOCK_MONOTONIC, &now)) {
+    mju_error("Feather timer: clock_gettime failed");
+  }
+  return (mjtNum)now.tv_sec * 1000 + (mjtNum)now.tv_nsec * 1e-6;
+}
+#endif
+
+void mjf_enableTimers(int enable) {
+#ifdef _WIN32
+  if (enable) {
+    LARGE_INTEGER frequency;
+    if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0) {
+      mju_error("Feather timer: QueryPerformanceFrequency failed");
+    }
+    timer_tick_ms = 1000.0 / (mjtNum)frequency.QuadPart;
+  }
+#endif
+  mjcb_time = enable ? timerMilliseconds : NULL;
+}
 
 int mjf_layout(const char* type, const char* field) {
   if (!type) return -1;
