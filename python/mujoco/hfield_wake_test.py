@@ -116,6 +116,14 @@ class HfieldWakeTest(unittest.TestCase):
       self.assertLess(d.tree_asleep[0], 0)
       self.assertTrue(np.all(d.tree_asleep[1:3] >= 0))
 
+  def test_both_geom_margins_are_added_as_in_312_collision_driver(self):
+    m, d = self.settled()
+    m.geom_margin[m.body_geomadr[m.body('rack0').id]] = .1
+    m.geom_margin[m.geom('sand').id] = .1
+    self.write(m, d, [24])  # requires their .2 sum, not either .1 alone
+    self.assertLess(d.tree_asleep[0], 0)
+    self.assertTrue(np.all(d.tree_asleep[1:3] >= 0))
+
   def test_every_instance_of_shared_height_asset_is_considered(self):
     m, d = self.settled(shared=True)
     self.assertGreaterEqual(d.tree_asleep[3], 0)

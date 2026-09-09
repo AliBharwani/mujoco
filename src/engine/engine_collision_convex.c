@@ -854,11 +854,6 @@ static void mju_rotateFrame(const mjtNum origin[3], const mjtNum rot[9],
 
 // return number of contacts supported by a single pass of narrowphase
 static int maxContacts(const mjModel* m, const mjCCDObj* obj1, const mjCCDObj* obj2) {
-  // single pass not supported for margins
-  if (obj1->margin > 0 || obj2->margin > 0) {
-    return 1;
-  }
-
   // can return 8 contacts for box-box collision in one pass
   int type1 = obj1->geom_type;
   int type2 = obj2->geom_type;

@@ -21,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <utility>
 
 #include <ccd/ccd.h>  // IWYU pragma: keep
 #include <ccd/vec3.h>  // IWYU pragma: keep
@@ -2176,6 +2177,41 @@ TEST_F(MjGjkTest, ThinBoxGrazing) {
   // below ccd_tolerance, but still positive distance
   EXPECT_GE(dist, 0);
   EXPECT_LE(dist, model->opt.ccd_tolerance);
+}
+
+// Each CCD object's support inflates by half its own margin. Face recovery must
+// retain that contract even when the low-level caller supplies unequal margins.
+TEST_F(MjGjkTest, PositiveMarginFaceWitnessesRespectEachObject) {
+  static constexpr char xml[] = R"(
+    <mujoco><worldbody><geom type="box" size="1 1 .1" pos="0 0 -.1"/>
+    <body pos="0 0 .1005"><freejoint/><geom type="box" size=".2 .3 .1"/>
+    </body></worldbody></mujoco>)";
+  MjModelPtr model = LoadModelFromString(xml);
+  ASSERT_NE(model, nullptr);
+  MjDataPtr data = MakeData(model);
+  mj_forward(model.get(), data.get());
+  for (auto margins : {std::pair<mjtNum, mjtNum>{.006, .014}, {.02, .002}}) {
+    mjCCDObj obj1, obj2;
+    mjc_initCCDObj(&obj1, model.get(), data.get(), 0, margins.first);
+    mjc_initCCDObj(&obj2, model.get(), data.get(), 1, margins.second);
+    auto buffer = std::vector<std::byte>(
+        mjc_ccdSize(model->npolygonmax, model->nmeshdegmax, kMaxIterations));
+    mjCCDConfig config{};
+    config.max_iterations = kMaxIterations;
+    config.tolerance = kTolerance;
+    config.max_contacts = 8;
+    config.npolygonmax = model->npolygonmax;
+    config.nmeshdegmax = model->nmeshdegmax;
+    config.buffer = buffer.data();
+    mjCCDStatus status;
+    EXPECT_LT(mjc_ccd(&config, &status, &obj1, &obj2), 0);
+    ASSERT_EQ(status.nx, 4);
+    for (int i = 0; i < status.nx; ++i) {
+      EXPECT_NEAR(status.x1[3*i+2], .5*margins.first, 1e-9);
+      EXPECT_NEAR(status.x2[3*i+2], .0005-.5*margins.second, 1e-9);
+      EXPECT_NEAR(status.dist[i], .0005-.5*(margins.first+margins.second), 1e-9);
+    }
+  }
 }
 
 }  // namespace

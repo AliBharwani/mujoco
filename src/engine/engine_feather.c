@@ -142,7 +142,7 @@ static int wakeHfieldRegion(const mjModel* m, mjData* d, int id,
         mju_sub3(dif, center, hpos);
         mju_mulMatTVec3(local, hmat, dif);
         mju_mulMatTMat3(rotation, hmat, mat);
-        mjtNum margin = mju_max(pair_margin, mju_max(m->geom_margin[g], m->geom_margin[hg]));
+        mjtNum margin = mju_max(pair_margin, m->geom_margin[g] + m->geom_margin[hg]);
         if (m->opt.enableflags & mjENBL_OVERRIDE) margin = m->opt.o_margin;
         margin = mju_max(0, margin);
         mjtNum ex = margin, ey = margin;
