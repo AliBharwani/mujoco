@@ -37,7 +37,8 @@ MJAPI void mjf_enableTimers(int enable);
 MJAPI int mjf_wakeAll(const mjModel* m, mjData* d);
 
 // Validate the whole input, clamp to [0,1], write only changes and wake this data's
-// sleeping islands. Shared-model callers must also wake their other datas.
+// overlapping sleeping islands. Shared-model callers must also wake their other
+// datas via mjf_wakeHfieldRegion (or mjf_wakeAll for a conservative fallback).
 // Returns -1 for invalid input (no writes), 0 for identical data, 1 for a change.
 MJAPI int mjf_writeHfieldData(mjModel* m, mjData* d, int id,
                              const float* values, int count);
@@ -55,6 +56,14 @@ MJAPI int mjf_writeHfieldRows(mjModel* m, mjData* d, int id, int row_start,
 // writes BEFORE collision. Call while all readers of this model are idle.
 // Returns -1 for invalid input (including non-finite raw heights), 0 otherwise.
 MJAPI int mjf_enableHfieldMip(mjModel* m, int id, int enable);
+
+// Wake sleeping islands over an edited rectangle of SAMPLES (not cells), with
+// adjacent-cell and contact-margin expansion, for every geom using this hfield.
+// Use after synchronized raw writes or for other datas sharing a written model.
+// Kinematics must be current. Returns number of trees woken, or -1 for invalid
+// input. Already-awake trees and their sleep counters are left unchanged.
+MJAPI int mjf_wakeHfieldRegion(const mjModel* m, mjData* d, int id,
+                              int row_start, int row_count, int col_start, int col_count);
 
 // World-space velocities [angular xyz, linear xyz], body or body-frame origin.
 // Output shape: [ndata, nbody, 6], double precision. No stepping or allocations.

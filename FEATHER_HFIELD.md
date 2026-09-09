@@ -1,6 +1,6 @@
 # Feather: polyhedral heightfield contacts
 
-This 3.9.0 fork adds an interior top-surface collision path for boxes and meshes
+Originally developed on 3.9 and now ported to 3.12, this fork adds an interior top-surface collision path for boxes and meshes
 with compiled convex polygons. It fixes lateral contacts against the internal
 walls of the triangular prisms used by the original heightfield collider.
 
@@ -15,7 +15,9 @@ The original collider handles other primitive types, meshes without compiled
 convex polygons, and a whole pair whenever the polyhedron reaches the field's
 outer walls or underside. Thus the top-normal guarantee applies to the interior
 box/convex-mesh path. This is a discrete contact-generation fix, not swept CCD.
-No public header or struct layout changes; C# bindings need no regeneration.
+The original contact correction itself changes no public layouts. The later
+[optional mip acceleration](FEATHER_HFIELD_MIP.md) adds model-owned arrays and
+requires regenerated bindings and an explicit write/refresh contract.
 
 The 3.9 integration2 build first attempts an uncached whole-polyhedron height
 rejection. It scans samples over the footprint and bounds both height and slope
@@ -23,7 +25,7 @@ so contact margin remains a normal-distance allowance. It stops scanning when
 the bound cannot reject, preserving the original contact traversal and reduction.
 Elevated rack geometry avoids repeated per-facet terrain-triangle construction;
 geometry actually in contact still uses the full top-surface path. There is no
-height cache or additional write/invalidation contract. Tiny cell areas and
+height cache or additional write/invalidation contract in that original path. Tiny cell areas and
 unsupported margins retain the reference path.
 
 Run `python/mujoco/hfield_test.py` against bindings linked to this build. It covers

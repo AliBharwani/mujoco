@@ -1,6 +1,8 @@
 # Feather integration API
 
-`mjfeather.h` adds an API without changing `mjModel`, `mjData` or `mjContact`.
+`mjfeather.h` exposes the fork's integration API. Since 3.12 integration3,
+`mjModel` includes three model-owned hfield-cache arrays; regenerate bindings
+and use a complete matching bundle. `mjData` and `mjContact` remain unchanged.
 
 - `mjf_enableTimers(1)` installs a native monotonic wall clock in milliseconds
   (`CLOCK_MONOTONIC` on Linux, `QueryPerformanceCounter` on Windows). It is opt-in
@@ -13,7 +15,7 @@
   and COLLISION contains BROAD/NARROW. Inverse is inactive in ordinary forward
   stepping. Omitted work/timer overhead means an arbitrary sub-stage sum need not
   equal STEP. Wall time includes descheduling; measure overhead before leaving it
-  on in production collection. No training or Unity call site enables it by default.
+  on in production collection. Application call sites own enabling the clock.
 - `mjf_buildId` identifies native source + declared dependency pins (including dirty
   source files). `mjf_layout` checks struct sizes and selected field offsets before
   a consumer allocates or dereferences them. Binary hashes/toolchain identity are
@@ -24,7 +26,8 @@
   the total count even when its caller buffer is too small. It is still O(ngeom).
   Original query exports and upstream `mj_ray` semantics are preserved.
 - Heightfield writes validate the entire finite input and exact count, clamp to
-  [0,1], and wake sleeping islands on changes. Identical writes do not wake. For
+  [0,1], and wake overlapping sleeping islands on changes (since integration4;
+  see [regional wakes](FEATHER_REGION_WAKE.md)). Identical writes do not wake. For
   shared models, the caller must wake every other live `mjData` and synchronize
   writes against stepping. Other runtime model edits must explicitly wake too.
 - Guarded substeps preserve Feather's post-step joint/free-root velocity clamps,

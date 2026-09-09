@@ -1,5 +1,5 @@
 // Copyright 2026 Feather contributors. Licensed under Apache-2.0.
-// Narrow integration helpers: no public model/data layout changes.
+// Narrow integration helpers. Model-owned hfield caches follow the model buffer lifecycle.
 #include <math.h>
 #include <stddef.h>
 #include <string.h>
@@ -14,7 +14,9 @@
 #include <mujoco/mjfeather.h>
 #include <mujoco/mujoco.h>
 #include "engine/engine_collision_hfield.h"
+#include "engine/engine_memory.h"
 #include "engine/engine_sleep.h"
+#include "engine/engine_util_blas.h"
 #include "build_id.h"
 
 const char* mjf_buildId(void) { return MJ_FEATHER_BUILD_ID; }
@@ -108,6 +110,85 @@ int mjf_enableHfieldMip(mjModel* m, int id, int enable) {
   return 0;
 }
 
+// The optional dirty mask identifies actual changed samples within written rows.
+// This avoids waking the rack between two disjoint prints in the same update.
+// Without a mask the public API conservatively treats the rectangle as changed.
+static int wakeHfieldRegion(const mjModel* m, mjData* d, int id,
+                            int rmin, int rmax, int cmin, int cmax,
+                            const mjtByte* dirty, int dirty_row_start) {
+  if (!(m->opt.enableflags & mjENBL_SLEEP)) return 0;
+  int nr = m->hfield_nrow[id], nc = m->hfield_ncol[id];
+  const mjtNum* size = m->hfield_size + 4*id;
+  mjtNum dx = 2*size[0]/(nc-1), dy = 2*size[1]/(nr-1);
+  // Explicit pairs may author a larger margin than either geom. Taking their
+  // maximum is conservative and keeps this rare model-edit path simple.
+  mjtNum pair_margin = 0;
+  for (int p = 0; p < m->npair; p++) pair_margin = mju_max(pair_margin, m->pair_margin[p]);
+  int woke = 0;
+  for (int hg = 0; hg < m->ngeom; hg++) {
+    if (m->geom_type[hg] != mjGEOM_HFIELD || m->geom_dataid[hg] != id) continue;
+    const mjtNum* hpos = d->geom_xpos+3*hg;
+    const mjtNum* hmat = d->geom_xmat+9*hg;
+    for (int g = 0; g < m->ngeom; g++) {
+      int tree = m->body_treeid[m->geom_bodyid[g]];
+      if (tree < 0 || d->tree_asleep[tree] < 0) continue;
+      int r0 = rmin, r1 = rmax, c0 = cmin, c1 = cmax;
+      if (m->geom_type[g] != mjGEOM_PLANE) {
+        const mjtNum* aabb = m->geom_aabb+6*g;
+        const mjtNum* mat = d->geom_xmat+9*g;
+        mjtNum center[3], dif[3], local[3], rotation[9];
+        mju_mulMatVec3(center, mat, aabb);
+        mju_addTo3(center, d->geom_xpos+3*g);
+        mju_sub3(dif, center, hpos);
+        mju_mulMatTVec3(local, hmat, dif);
+        mju_mulMatTMat3(rotation, hmat, mat);
+        mjtNum margin = mju_max(pair_margin, mju_max(m->geom_margin[g], m->geom_margin[hg]));
+        if (m->opt.enableflags & mjENBL_OVERRIDE) margin = m->opt.o_margin;
+        margin = mju_max(0, margin);
+        mjtNum ex = margin, ey = margin;
+        for (int j = 0; j < 3; j++) {
+          ex += mju_abs(rotation[j])*aabb[3+j];
+          ey += mju_abs(rotation[3+j])*aabb[3+j];
+        }
+        // Each edited vertex affects the cells on both sides. Work in the
+        // hfield's own frame, including translated/rotated/instanced fields.
+        mjtNum x0 = (local[0]-ex+size[0])/dx, x1 = (local[0]+ex+size[0])/dx;
+        mjtNum y0 = (local[1]-ey+size[1])/dy, y1 = (local[1]+ey+size[1])/dy;
+        if (x1+1 < cmin || x0-1 > cmax || y1+1 < rmin || y0-1 > rmax) continue;
+        c0 = mjMAX(cmin, (int)ceil(mju_max(-1, x0-1e-9))-1);
+        c1 = mjMIN(cmax, (int)mju_floor(mju_min(nc, x1+1e-9))+1);
+        r0 = mjMAX(rmin, (int)ceil(mju_max(-1, y0-1e-9))-1);
+        r1 = mjMIN(rmax, (int)mju_floor(mju_min(nr, y1+1e-9))+1);
+      }
+      int hit = !dirty && r0 <= r1 && c0 <= c1;
+      for (int r = r0; dirty && !hit && r <= r1; r++) {
+        for (int c = c0; c <= c1; c++) {
+          if (dirty[(mjtSize)(r-dirty_row_start)*nc+c]) { hit = 1; break; }
+        }
+      }
+      if (hit) {
+        // Wake the complete upstream sleeping island, including welded or
+        // contact/equality-coupled trees, never just one member of its cycle.
+        woke += mj_wakeIsland(d->tree_asleep, m->ntree, tree, -(1+mjMINAWAKE),
+                              "heightfield edit", d->time);
+      }
+    }
+  }
+  if (woke) mj_updateSleep(m, d);
+  return woke;
+}
+
+int mjf_wakeHfieldRegion(const mjModel* m, mjData* d, int id,
+                         int row_start, int row_count, int col_start, int col_count) {
+  if (!m || !d || id < 0 || id >= m->nhfield || row_start < 0 || col_start < 0 ||
+      row_count < 0 || col_count < 0 || row_start > m->hfield_nrow[id] ||
+      col_start > m->hfield_ncol[id] || row_count > m->hfield_nrow[id]-row_start ||
+      col_count > m->hfield_ncol[id]-col_start) return -1;
+  if (!row_count || !col_count) return 0;
+  return wakeHfieldRegion(m, d, id, row_start, row_start+row_count-1,
+                          col_start, col_start+col_count-1, NULL, 0);
+}
+
 int mjf_writeHfieldRows(mjModel* m, mjData* d, int id, int row_start,
                        int row_count, const float* values, int count) {
   if (!m || !d || !values || id < 0 || id >= m->nhfield || row_start < 0 ||
@@ -118,11 +199,18 @@ int mjf_writeHfieldRows(mjModel* m, mjData* d, int id, int row_start,
     if (!isfinite(values[i])) return -1;
   }
   int nc = m->hfield_ncol[id];
+  mjtByte* dirty = NULL;
+  if (count && (m->opt.enableflags & mjENBL_SLEEP)) {
+    mj_markStack(d);
+    dirty = mj_stackAllocByte(d, count, 1);
+    memset(dirty, 0, count);
+  }
   float* dst = m->hfield_data + m->hfield_adr[id] + (mjtSize)row_start*nc;
   int rmin = m->hfield_nrow[id], rmax = -1, cmin = nc, cmax = -1;
   for (int i = 0; i < count; i++) {
     float v = values[i] < 0 ? 0 : values[i] > 1 ? 1 : values[i];
     if (dst[i] != v) {
+      if (dirty) dirty[i] = 1;
       dst[i] = v;
       int r = row_start+i/nc, c = i%nc;
       rmin = mjMIN(rmin, r); rmax = mjMAX(rmax, r);
@@ -131,8 +219,9 @@ int mjf_writeHfieldRows(mjModel* m, mjData* d, int id, int row_start,
   }
   if (rmax >= 0) {
     if (m->hfield_mipvalid[id]) mjc_updateHFieldMip(m, id, rmin, rmax, cmin, cmax);
-    mjf_wakeAll(m, d);
+    wakeHfieldRegion(m, d, id, rmin, rmax, cmin, cmax, dirty, row_start);
   }
+  if (dirty) mj_freeStack(d);
   return rmax >= 0;
 }
 
