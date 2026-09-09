@@ -171,6 +171,51 @@ static int clipTriangle(mjtNum output[8][3], const mjtNum* a, const mjtNum* b,
 }
 
 
+// Conservative, uncached rejection of a whole polyhedron above its footprint.
+// Scan height samples once per pair instead of constructing both top triangles
+// for every lower hull facet. The height range bounds both triangle gradients;
+// 1 + |gx| + |gy| bounds sqrt(1 + gx*gx + gy*gy), including contact margin.
+// Stop as soon as this bound cannot reject: loaded contacts usually exit early.
+// No contact selection/order changes, model cache, writes or invalidation rules.
+static int aboveFootprint(const mjtNum* vertices, int nv, const mjtNum size[4],
+                          const float* heights, int nr, int nc, mjtNum margin) {
+  mjtNum lo[3], hi[3];
+  mju_copy3(lo, vertices);
+  mju_copy3(hi, vertices);
+  for (int i = 1; i < nv; i++) {
+    for (int j = 0; j < 3; j++) {
+      lo[j] = mju_min(lo[j], vertices[3*i+j]);
+      hi[j] = mju_max(hi[j], vertices[3*i+j]);
+    }
+  }
+  mjtNum dx = 2*size[0]/(nc-1), dy = 2*size[1]/(nr-1);
+  int cmin = mjMAX(0, (int)mju_floor((lo[0]+size[0])/dx));
+  int cmax = mjMIN(nc-2, (int)mju_floor((hi[0]+size[0])/dx));
+  int rmin = mjMAX(0, (int)mju_floor((lo[1]+size[1])/dy));
+  int rmax = mjMIN(nr-2, (int)mju_floor((hi[1]+size[1])/dy));
+  // At very small cell areas, or unreasonably large margins, defer entirely to
+  // the reference's normalization and contact arithmetic.
+  if (dx*dy < 1e-12 || margin < 0 || margin > size[0]+size[1]) {
+    return 0;
+  }
+  mjtNum low = mjMAXVAL, high = -mjMAXVAL;
+  for (int r = rmin; r <= rmax+1; r++) {
+    for (int c = cmin; c <= cmax+1; c++) {
+      mjtNum z = heights[r*nc+c]*size[2];
+      low = mju_min(low, z);
+      high = mju_max(high, z);
+      mjtNum bound = high + margin*(1 + (high-low)*(1/dx + 1/dy));
+      // Leave a guard band for floating point coordinates/normal arithmetic.
+      mjtNum guard = 1e-12*(1 + mju_abs(lo[2]) + mju_abs(bound));
+      if (lo[2] <= bound + guard) {
+        return 0;
+      }
+    }
+  }
+  return 1;
+}
+
+
 // Intersect a lower hull triangle with the top surface, restricted to its cells.
 static int collideTriangle(mjPreContact* con, int ncon, const mjtNum* a,
                            const mjtNum* b, const mjtNum* c, const mjtNum size[4],
@@ -267,6 +312,10 @@ int mjc_PolyHField(const mjModel* m, mjData* d, mjPreContact* con,
 
   const float* heights = m->hfield_data + m->hfield_adr[hid];
   int nr = m->hfield_nrow[hid], nc = m->hfield_ncol[hid], ncon = 0;
+  if (aboveFootprint(vertices, nv, size, heights, nr, nc, margin)) {
+    mj_freeStack(d);
+    return 0;
+  }
   // Hull polygon vertex indices are local to the mesh, including with maxhullvert.
   // Fan triangulation avoids a fixed polygon-size limit.
   if (type == mjGEOM_MESH) {

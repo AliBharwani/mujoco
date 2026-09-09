@@ -17,11 +17,22 @@ outer walls or underside. Thus the top-normal guarantee applies to the interior
 box/convex-mesh path. This is a discrete contact-generation fix, not swept CCD.
 No public header or struct layout changes; C# bindings need no regeneration.
 
+The 3.9 integration2 build first attempts an uncached whole-polyhedron height
+rejection. It scans samples over the footprint and bounds both height and slope
+so contact margin remains a normal-distance allowance. It stops scanning when
+the bound cannot reject, preserving the original contact traversal and reduction.
+Elevated rack geometry avoids repeated per-facet terrain-triangle construction;
+geometry actually in contact still uses the full top-surface path. There is no
+height cache or additional write/invalidation contract. Tiny cell areas and
+unsupported margins retain the reference path.
+
 Run `python/mujoco/hfield_test.py` against bindings linked to this build. It covers
 flat cell seams, both CCD flag settings, three resolutions, margins, five-second
 passive drift, slopes, ridges/valleys, arbitrary orientations, rotated fields,
 dense nonplanar terrain, and preservation of outer-wall/underside contacts.
-Six of eight tests fail on stock 3.9; all eight pass on the patch. Also run the
+Six of the original eight tests fail on stock 3.9. Two additional regressions
+cover normal-distance margin above a steep ridge and live writes after a rejected
+pair. Also run the
 upstream collision, ray, and sleep tests. The ray tests require the normal CTest
 `MUJOCO_PLUGIN_DIR` environment to find the SDF plugin.
 

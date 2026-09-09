@@ -109,6 +109,43 @@ class HfieldTopSurfaceTest(unittest.TestCase):
         for c in d.contact:
           self.assertAlmostEqual(c.dist, bottom, places=7)
 
+  def test_above_footprint_uses_normal_distance_margin_on_steep_ridge(self):
+    # Bottom is above the highest sample by .025, exceeding the .02 pair
+    # margin vertically, but within that margin along the slope's normal.
+    # A max-height + margin rejection would incorrectly discard these contacts.
+    vertices = ' '.join(str(v) for xyz in itertools.product(
+        (-.008, .008), (-.03, .03), (-.002, .002)) for v in xyz)
+    for kind in ('box', 'mesh'):
+      geom = ('type="box" size=".008 .03 .002"' if kind == 'box'
+              else 'type="mesh" mesh="sole"')
+      m = mujoco.MjModel.from_xml_string(f'''<mujoco>
+        <default><geom margin=".01"/></default>
+        <asset><hfield name="h" nrow="3" ncol="5" size="1 .5 1 .1"/>
+          <mesh name="sole" vertex="{vertices}"/></asset>
+        <worldbody><geom type="hfield" hfield="h"/>
+          <body pos="0 0 1.027"><freejoint/><geom {geom} mass="1"/></body>
+        </worldbody></mujoco>''')
+      m.hfield_data[:] = np.tile([0, 0, 1, 0, 0], 3)
+      d = mujoco.MjData(m)
+      mujoco.mj_forward(m, d)
+      self.assertGreater(d.ncon, 0, kind)
+      self.assertTrue((d.contact.dist > 0).all())
+      self.assertTrue((d.contact.dist <= .02).all())
+      np.testing.assert_allclose(d.contact.frame[:, 2], 1/np.sqrt(5), atol=1e-12)
+
+  def test_above_footprint_rechecks_live_height_writes(self):
+    for kind, n in itertools.product(('box', 'mesh'), (17, 129)):
+      m = model(kind, n=n)
+      d = mujoco.MjData(m)
+      d.qpos[2] = .08  # lowest point .06, within the declared hfield volume
+      for height, expected in ((0, 0), (.061, 4), (0, 0)):
+        m.hfield_data[:] = height
+        mujoco.mj_forward(m, d)
+        self.assertEqual(d.ncon, expected, (kind, n, height))
+        if expected:
+          np.testing.assert_allclose(d.contact.dist, -.001, atol=2e-8)
+          np.testing.assert_allclose(d.contact.frame[:, 2], 1, atol=1e-12)
+
   def test_ridge_and_valley_normals_belong_to_top_faces(self):
     for kind, sign in itertools.product(('box', 'mesh'), (-1, 1)):
       m = model(kind)
