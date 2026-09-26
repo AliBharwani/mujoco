@@ -87,6 +87,8 @@ typedef struct {
   mjtNum x1[3 * mjMAXCONPAIR];  // witness points for geom 1
   mjtNum x2[3 * mjMAXCONPAIR];  // witness points for geom 2
   int nx;                       // number of witness points
+  int normal_valid;             // explicit normal for a recovered face manifold
+  mjtNum normal[3];             // geom 1 to geom 2; independent of witness separation
 
   // configurations used
   int max_iterations;           // the maximum number of iterations for GJK and EPA

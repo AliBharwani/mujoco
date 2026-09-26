@@ -370,7 +370,7 @@ mjtSize MjzEncode(const mjSpec* spec, const mjModel* model, const mjVFS* vfs,
                                        error, sizeof(error));
     if (!res) {
       mju_warning("MJZ encoder: failed to open resource '%s' (dir='%s'): %s",
-                  entry.disk_path.c_str(), entry.source_dir.c_str(), error);
+                  entry.disk_path.string().c_str(), entry.source_dir.string().c_str(), error);
       continue;
     }
 

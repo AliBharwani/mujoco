@@ -24,6 +24,7 @@
 #include <mujoco/mjmacro.h>
 #include <mujoco/mjmodel.h>
 #include "engine/engine_collision_gjk.h"
+#include "engine/engine_collision_hfield.h"
 #include "engine/engine_macro.h"
 #include "engine/engine_memory.h"
 #include "engine/engine_inline.h"
@@ -120,8 +121,12 @@ static int mjc_penetration(const mjModel* m, mjData* d, mjCCDObj* obj1, mjCCDObj
       con[i].dist = margin + status.dist[i];
       mji_add3(con[i].pos, status.x1 + 3*i, status.x2 + 3*i);
       mju_scl3(con[i].pos, con[i].pos, 0.5);
-      mji_sub3(con[i].normal, status.x1 + 3*i, status.x2 + 3*i);
-      mju_normalize3(con[i].normal);
+      if (status.normal_valid) {
+        mji_copy3(con[i].normal, status.normal);
+      } else {
+        mji_sub3(con[i].normal, status.x1 + 3*i, status.x2 + 3*i);
+        mju_normalize3(con[i].normal);
+      }
       mji_zero3(con[i].tangent);
     }
     ncon = nwitness;
@@ -853,11 +858,6 @@ static void mju_rotateFrame(const mjtNum origin[3], const mjtNum rot[9],
 
 // return number of contacts supported by a single pass of narrowphase
 static int maxContacts(const mjModel* m, const mjCCDObj* obj1, const mjCCDObj* obj2) {
-  // single pass not supported for margins
-  if (obj1->margin > 0 || obj2->margin > 0) {
-    return 1;
-  }
-
   // can return 8 contacts for box-box collision in one pass
   int type1 = obj1->geom_type;
   int type2 = obj2->geom_type;
@@ -1143,6 +1143,11 @@ static inline void addPrismVert(mjCCDObj* obj, int r, int c, int i, mjtNum dx, m
 // entry point for heightfield collisions
 int mjc_ConvexHField(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2,
                      mjtNum margin) {
+  int polycon = mjc_PolyHField(m, d, con, g1, g2, margin);
+  if (polycon >= 0) {
+    return polycon;
+  }
+
   // hfield frame
   const mjtNum* pos1 = d->geom_xpos + 3*g1;
   const mjtNum* mat1 = d->geom_xmat + 9*g1;

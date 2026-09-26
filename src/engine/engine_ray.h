@@ -70,6 +70,11 @@ MJAPI mjtNum mj_rayFlex(const mjModel* m, const mjData* d, int flex_layer,
 MJAPI mjtNum mju_raySkin(int nface, int nvert, const int* face, const float* vert,
                          const mjtNum pnt[3], const mjtNum vec[3], int vertid[1]);
 
+// Feather gameplay filter; NULL mask preserves the upstream visibility-only rules.
+mjtNum mj_rayMask(const mjModel* m, const mjData* d, const mjtNum pnt[3], const mjtNum vec[3],
+                  const mjtByte* geomgroup, mjtBool flg_static, int bodyexclude,
+                  int geomid[1], mjtNum normal[3], const int* collision_mask);
+
 #ifdef __cplusplus
 }
 #endif

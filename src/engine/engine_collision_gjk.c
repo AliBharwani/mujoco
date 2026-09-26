@@ -1608,9 +1608,19 @@ static int halfspace(const mjtNum a[3], const mjtNum n[3], const mjtNum p[3]) {
 
 // compute witness points on face (given by point p and normal n) from clipped vertex
 static inline mjtNum witnessOnFace(mjtNum w1[3], mjtNum w2[3], const mjtNum v[3],
-                                   const mjtNum* p, const mjtNum n[3], const mjtNum dir[3]) {
+                                   const mjtNum* p, const mjtNum n[3], const mjtNum dir[3],
+                                   mjtNum margin1, mjtNum margin2) {
+  mjtNum margin = margin1 + margin2;
   mjtNum d[3] = {v[0] - p[0], v[1] - p[1], v[2] - p[2]};
   mjtNum dist = dot3(d, n);
+  if (margin > 0) {
+    // Clip physical faces, then reconstruct the inflated witnesses expected by
+    // mjc_penetration. Their midpoint and restored distance lie on the original
+    // contact geometry. Use the reference normal consistently at every vertex.
+    addScl3(w1, v, n, -dist + margin1);
+    addScl3(w2, v, n, -margin2);
+    return dist - margin;
+  }
   addScl3(w1, v, dir, -mju_abs(dist));
   copy3(w2, v);
   return dist;
@@ -1620,7 +1630,8 @@ static inline mjtNum witnessOnFace(mjtNum w1[3], mjtNum w2[3], const mjtNum v[3]
 // clip a polygon against another polygon
 static void polygonClip(mjCCDStatus* status, const mjtNum* face1, int nface1,
                         const mjtNum* face2, int nface2, const mjtNum n[3],
-                        const mjtNum dir[3], mjtNum* buffer, int npolygonmax) {
+                        const mjtNum dir[3], mjtNum* buffer, int npolygonmax, mjtNum margin1, mjtNum margin2) {
+  mjtNum margin = margin1 + margin2;
   // clipping face needs to be at least a triangle
   if (nface1 < 3) {
     return;
@@ -1690,13 +1701,13 @@ static void polygonClip(mjCCDStatus* status, const mjtNum* face1, int nface1,
     nclipped = 0;
   }
 
-  // prune out vertices with positive distance from the face
+  // prune out vertices beyond the contact margin from the physical face
   int m = npolygon;
   npolygon = 0;
   for (int i = 0; i < m; i++) {
     mjtNum diff[3];
     sub3(diff, polygon + 3*i, face1);
-    if (dot3(diff, n) <= 0) {
+    if (dot3(diff, n) <= margin) {
       if (npolygon != i) {
         copy3(polygon + 3*npolygon, polygon + 3*i);
       }
@@ -1708,13 +1719,20 @@ static void polygonClip(mjCCDStatus* status, const mjtNum* face1, int nface1,
     return;
   }
 
+  // Near the margin the inflated witnesses coincide to machine precision.
+  // Retain the known face normal instead of recovering it from their difference.
+  if (margin > 0) {
+    copy3(status->normal, n);
+    status->normal_valid = 1;
+  }
+
   // copy final clipped polygon to status
   if (status->max_contacts < 5 && npolygon > 4) {
     status->nx = 4;
     mjtNum* rect[4];
     polygonQuad(rect, polygon, npolygon);
     for (int i = 0; i < 4; i++) {
-      dist[i] = witnessOnFace(status->x1 + 3*i, status->x2 + 3*i, rect[i], face1, n, dir);
+      dist[i] = witnessOnFace(status->x1 + 3*i, status->x2 + 3*i, rect[i], face1, n, dir, margin1, margin2);
     }
     return;
   }
@@ -1736,8 +1754,8 @@ static void polygonClip(mjCCDStatus* status, const mjtNum* face1, int nface1,
         }
       }
     }
-    dist[0] = witnessOnFace(status->x1, status->x2, polygon + 3*best1, face1, n, dir);
-    dist[1] = witnessOnFace(status->x1 + 3, status->x2 + 3, polygon + 3*best2, face1, n, dir);
+    dist[0] = witnessOnFace(status->x1, status->x2, polygon + 3*best1, face1, n, dir, margin1, margin2);
+    dist[1] = witnessOnFace(status->x1 + 3, status->x2 + 3, polygon + 3*best2, face1, n, dir, margin1, margin2);
     status->nx = 2;
     return;
   }
@@ -1746,7 +1764,7 @@ static void polygonClip(mjCCDStatus* status, const mjtNum* face1, int nface1,
   int maxcon = sizeof(status->x2) / (3*sizeof(status->x2[0]));
   npolygon = (npolygon < maxcon) ? npolygon : maxcon;
   for (int i = 0; i < npolygon; i++) {
-    dist[i] = witnessOnFace(status->x1 + 3*i, status->x2 + 3*i, polygon + 3*i, face1, n, dir);
+    dist[i] = witnessOnFace(status->x1 + 3*i, status->x2 + 3*i, polygon + 3*i, face1, n, dir, margin1, margin2);
   }
   status->nx = npolygon;
 }
@@ -2211,6 +2229,11 @@ static void multicontact(int nmeshdegmax, int npolygonmax, uint8_t* buffer, Poly
       return;
     }
   }
+  // Inflated EPA edge witnesses are not physical edge endpoints. Keep the
+  // original EPA contact for positive-margin edge cases; only recovered pairs
+  // of physical faces participate in the margin-aware clipping below.
+  mjtNum margin1 = 0.5*obj1->margin, margin2 = 0.5*obj2->margin;
+  if (margin1 + margin2 > 0 && (edgecon1 || edgecon2)) return;
   int i = res[0], j = res[1];
 
   // recover geom1 matching edge or face
@@ -2247,7 +2270,7 @@ static void multicontact(int nmeshdegmax, int npolygonmax, uint8_t* buffer, Poly
   // face1 is an edge; clip face1 against face2
   if (edgecon1) {
     scl3(wit_dir, n2 + 3*j, -1.0);
-    polygonClip(status, face2, nface2, face1, nface1, n2 + 3*j, wit_dir, polygon, npolygonmax);
+    polygonClip(status, face2, nface2, face1, nface1, n2 + 3*j, wit_dir, polygon, npolygonmax, margin1, margin2);
     // x1 and x2 must be flipped as we flipped the faces in polygonClip
     int nx = status->nx;
     for (int k = 0; k < nx; k++) {
@@ -2262,13 +2285,13 @@ static void multicontact(int nmeshdegmax, int npolygonmax, uint8_t* buffer, Poly
   // face2 is an edge; clip face2 against face1
   if (edgecon2) {
     scl3(wit_dir, n1 + 3*j, -1.0);
-    polygonClip(status, face1, nface1, face2, nface2, n1 + 3*j, wit_dir, polygon, npolygonmax);
+    polygonClip(status, face1, nface1, face2, nface2, n1 + 3*j, wit_dir, polygon, npolygonmax, margin1, margin2);
     return;
   }
 
   // face-face collision
   copy3(wit_dir, n2 + 3*j);
-  polygonClip(status, face1, nface1, face2, nface2, n1 + 3*i, wit_dir, polygon, npolygonmax);
+  polygonClip(status, face1, nface1, face2, nface2, n1 + 3*i, wit_dir, polygon, npolygonmax, margin1, margin2);
 }
 
 
@@ -2322,6 +2345,7 @@ size_t mjc_ccdSize(int npolygonmax, int nmeshdegmax, int iterations) {
 // general convex collision detection
 mjtNum mjc_ccd(const mjCCDConfig* config, mjCCDStatus* status, mjCCDObj* obj1, mjCCDObj* obj2) {
   // setup
+  status->normal_valid = 0;
   obj1->center(status->x1, obj1);
   obj2->center(status->x2, obj2);
   status->gjk_iterations = 0;
