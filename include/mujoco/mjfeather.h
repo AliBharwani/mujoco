@@ -33,6 +33,14 @@ MJAPI int mjf_layout(const char* type, const char* field);
 // timer call counts still advance. Reading/clearing mjData.timer is caller-owned.
 MJAPI void mjf_enableTimers(int enable);
 
+// Process-global convex-heightfield collider: 0 (default) smooth normals and at most
+// four feature-anchored contacts per pair; 1 integration6 face clipping; 2 upstream
+// solid prisms. Each falls back to the next for pairs it does not handle. Call only
+// while all simulations/workers are idle. Returns the previous collider, or -1 (no
+// change) for an unknown one.
+MJAPI int mjf_setHfieldCollider(int collider);
+MJAPI int mjf_hfieldCollider(void);
+
 // Wake all sleeping islands without changing positions, velocities or applied forces.
 MJAPI int mjf_wakeAll(const mjModel* m, mjData* d);
 

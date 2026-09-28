@@ -27,6 +27,13 @@ void mjc_updateHFieldMip(mjModel* m, int id, int rmin, int rmax, int cmin, int c
 int mjc_PolyHField(const mjModel* m, mjData* d, mjPreContact* con,
                   int hgeom, int pgeom, mjtNum margin);
 
+// Smooth-normal, feature-anchored contacts for any convex primitive or polygon mesh
+// over the heightfield's interior (at most four per pair). Returns -1 when another
+// collider must handle the pair: unsupported types, meshes without polygons, or geoms
+// reaching the field's side walls or underside.
+int mjc_SmoothHField(const mjModel* m, mjData* d, mjPreContact* con,
+                     int hgeom, int g, mjtNum margin);
+
 #ifdef __cplusplus
 }
 #endif
