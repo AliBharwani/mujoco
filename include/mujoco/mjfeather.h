@@ -1,8 +1,9 @@
 // mjfeather.h — Feather fork additions to the MuJoCo C API.
 //
-// Native spatial-query layer for the Feather/Unity port. Kept in a SEPARATE
-// header + source file (engine_query.c) under the `mjf_` namespace so the fork
-// rebases cleanly onto upstream MuJoCo tags. These reuse MuJoCo's own geom
+// The spatial queries, heightfield writes and wakes, collider selection, timers and build
+// identity the Feather/Unity port calls. Kept in this header and the fork's own source files
+// (engine_query.c, engine_feather.c, engine_collision_hfield.c) under the `mjf_` namespace
+// so the fork rebases cleanly onto upstream MuJoCo tags. These reuse MuJoCo's own geom
 // state, so query results stay consistent with the simulation. Exposed with
 // MJAPI so the symbols are visible in libmujoco for C# P/Invoke.
 //
@@ -34,8 +35,8 @@ MJAPI int mjf_layout(const char* type, const char* field);
 MJAPI void mjf_enableTimers(int enable);
 
 // Process-global convex-heightfield collider: 0 (default) smooth normals and at most
-// four feature-anchored contacts per pair; 1 integration6 face clipping; 2 upstream
-// solid prisms. Each falls back to the next for pairs it does not handle. Call only
+// four feature-anchored contacts per pair; 1 face clipping of the hull's lower faces;
+// 2 upstream solid prisms. Each falls back to the next for pairs it does not handle. Call only
 // while all simulations/workers are idle. Returns the previous collider, or -1 (no
 // change) for an unknown one.
 MJAPI int mjf_setHfieldCollider(int collider);
@@ -58,7 +59,8 @@ MJAPI int mjf_writeHfieldData(mjModel* m, mjData* d, int id,
 MJAPI int mjf_writeHfieldRows(mjModel* m, mjData* d, int id, int row_start,
                              int row_count, const float* values, int count);
 
-// Opt in to cached hfield search (initially disabled for raw-write compatibility).
+// Opt in to cached hfield search for collider 1 (initially disabled for raw-write
+// compatibility; the default collider does not read it).
 // Nonzero fully refreshes then enables this field; zero disables it. Subsequent
 // writes must use the write APIs above, or call this again to refresh after raw
 // writes BEFORE collision. Call while all readers of this model are idle.

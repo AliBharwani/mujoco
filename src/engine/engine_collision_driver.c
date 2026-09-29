@@ -613,31 +613,22 @@ static int* bodyNodeMasks(const mjModel* m, mjData* d) {
       continue;
     }
 
-    // the compiler numbers every child after its parent, so a reverse walk fills children first;
-    // a node that breaks that order gets every bit, which never prunes
+    // the compiler numbers every child after its parent, so a reverse walk fills children first
     for (int node=m->body_bvhnum[b]-1; node >= 0; node--) {
       int i = adr + node;
       const int* child = m->bvh_child + 2*i;
       if (child[0] < 0 && child[1] < 0) {
-        int g = m->bvh_nodeid[i];
-        mask[2*i+0] = g >= 0 ? m->geom_contype[g] : 0;
-        mask[2*i+1] = g >= 0 ? m->geom_conaffinity[g] : 0;
+        mask[2*i+0] = m->geom_contype[m->bvh_nodeid[i]];
+        mask[2*i+1] = m->geom_conaffinity[m->bvh_nodeid[i]];
         continue;
       }
-      int contype = 0, conaffinity = 0;
+      mask[2*i+0] = mask[2*i+1] = 0;
       for (int k=0; k < 2; k++) {
-        if (child[k] < 0) {
-          continue;
+        if (child[k] >= 0) {
+          mask[2*i+0] |= mask[2*(adr + child[k]) + 0];
+          mask[2*i+1] |= mask[2*(adr + child[k]) + 1];
         }
-        if (child[k] <= node) {
-          contype = conaffinity = ~0;
-          break;
-        }
-        contype |= mask[2*(adr + child[k]) + 0];
-        conaffinity |= mask[2*(adr + child[k]) + 1];
       }
-      mask[2*i+0] = contype;
-      mask[2*i+1] = conaffinity;
     }
   }
   return mask;
@@ -678,15 +669,15 @@ void mj_collision(const mjModel* m, mjData* d) {
   unsigned int last_signature = -1;
   TM_END(mjTIMER_COL_BROAD);
 
+  // narrowphase and midphase collision detector
+  TM_RESTART;
+
   // FEATHER: the midphase's node masks; not under a contact filter, which replaces the bitmask,
   // nor while the visualizer marks active bounding volumes, which a pruned pair would leave unmarked
   const int* nodemask = NULL;
   if (!mjcb_contactfilter && !m->vis.global.bvactive && !mjDISABLED(mjDSBL_MIDPHASE)) {
     nodemask = bodyNodeMasks(m, d);
   }
-
-  // narrowphase and midphase collision detector
-  TM_RESTART;
 
   // process bodyflex pairs returned by broadphase, merge with predefined geom pairs
   int pairadr = 0, ngeompair = 0, g1, g2;
@@ -1130,14 +1121,18 @@ static void mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
 
     // body : body
     if (isbody1 && isbody2) {
-      // both are leaves
-      if (isleaf1 && isleaf2) {
-        // FEATHER: the bitmask first; a pair it rejects never reaches the narrowphase
-        if (nodemask && filterBitmask(m->geom_contype[nodeid1], m->geom_conaffinity[nodeid1],
-                                      m->geom_contype[nodeid2], m->geom_conaffinity[nodeid2])) {
+      // FEATHER: no geom below one node can collide with one below the other (at a leaf the
+      // mask is the geom's own, so a rejected pair never reaches its sphere and box tests)
+      if (nodemask) {
+        const int* mask1 = nodemask + 2*(bvhadr1 + node1);
+        const int* mask2 = nodemask + 2*(bvhadr2 + node2);
+        if (filterBitmask(mask1[0], mask1[1], mask2[0], mask2[1])) {
           continue;
         }
+      }
 
+      // both are leaves
+      if (isleaf1 && isleaf2) {
         mjtNum margin = mj_assignMargin(m, m->geom_margin[nodeid1] + m->geom_margin[nodeid2]);
         mjtNum gap = m->geom_gap[nodeid1] + m->geom_gap[nodeid2];
 
@@ -1165,15 +1160,6 @@ static void mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
           }
         }
         continue;
-      }
-
-      // FEATHER: no geom below one node can collide with one below the other
-      if (nodemask) {
-        const int* mask1 = nodemask + 2*(bvhadr1 + node1);
-        const int* mask2 = nodemask + 2*(bvhadr2 + node2);
-        if (filterBitmask(mask1[0], mask1[1], mask2[0], mask2[1])) {
-          continue;
-        }
       }
 
       // if no intersection at intermediate levels, stop

@@ -75,6 +75,11 @@ mjtNum mj_rayMask(const mjModel* m, const mjData* d, const mjtNum pnt[3], const 
                   const mjtByte* geomgroup, mjtBool flg_static, int bodyexclude,
                   int geomid[1], mjtNum normal[3], const int* collision_mask);
 
+// FEATHER: a gameplay collision mask keeps a geom when its contype or conaffinity shares a bit
+static inline int mj_geomInMask(const mjModel* m, int g, int mask) {
+  return (m->geom_contype[g] | m->geom_conaffinity[g]) & mask;
+}
+
 #ifdef __cplusplus
 }
 #endif

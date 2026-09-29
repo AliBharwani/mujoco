@@ -1144,20 +1144,6 @@ static inline void addPrismVert(mjCCDObj* obj, int r, int c, int i, mjtNum dx, m
 // entry point for heightfield collisions
 int mjc_ConvexHField(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2,
                      mjtNum margin) {
-  int collider = mjf_hfieldCollider();
-  if (collider == 0) {
-    int smoothcon = mjc_SmoothHField(m, d, con, g1, g2, margin);
-    if (smoothcon >= 0) {
-      return smoothcon;
-    }
-  }
-  if (collider <= 1) {
-    int polycon = mjc_PolyHField(m, d, con, g1, g2, margin);
-    if (polycon >= 0) {
-      return polycon;
-    }
-  }
-
   // hfield frame
   const mjtNum* pos1 = d->geom_xpos + 3*g1;
   const mjtNum* mat1 = d->geom_xmat + 9*g1;
@@ -1187,6 +1173,21 @@ int mjc_ConvexHField(const mjModel* m, mjData* d, mjPreContact* con, int g1, int
       (size1 < local_pos[1] - radius) || (-size1 > local_pos[1] + radius) ||
       (size2 < local_pos[2] - radius) || (-size3 > local_pos[2] + radius)) {
     return 0;
+  }
+
+  // the fork's colliders over the grid interior; the prisms below take what they decline
+  int collider = mjf_hfieldCollider();
+  if (collider == 0) {
+    int smoothcon = mjc_SmoothHField(m, d, con, g1, g2, margin);
+    if (smoothcon >= 0) {
+      return smoothcon;
+    }
+  }
+  if (collider <= 1) {
+    int polycon = mjc_PolyHField(m, d, con, g1, g2, margin);
+    if (polycon >= 0) {
+      return polycon;
+    }
   }
 
   // ccd set up

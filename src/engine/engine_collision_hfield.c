@@ -7,13 +7,15 @@
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 
-// A heightfield's cell prisms share internal side faces. Treating those faces as
-// independent convex obstacles produces lateral EPA normals even on a flat field.
-// For interior polyhedra, clip the lower hull surface to each top triangle's XY
-// footprint instead. The resulting witnesses belong to the actual hull; their
-// signed distances, midpoints, and normals all refer to the same terrain plane.
-// The optional model-owned min/max pyramid skips empty tiles. Its default is
-// disabled so direct writes to the upstream height array remain supported.
+// Convex geoms against a heightfield's top surface. Upstream treats each cell as a solid
+// prism, whose internal side faces give lateral normals even on a flat field. Two colliders
+// replace that over the grid interior (mjf_setHfieldCollider; mjc_ConvexHField dispatches and
+// keeps the prisms for the side walls, the underside and anything the colliders decline):
+//   0 (default)  smooth: a smooth terrain normal and at most four contacts per pair, anchored
+//                at hull vertices, terrain samples and lattice crossings (mjc_SmoothHField);
+//   1            face clipping: the hull's lower faces clipped to each top triangle
+//                (mjc_PolyHField), with an optional model-owned min/max pyramid that skips
+//                empty tiles, off by default so raw writes to the height array stay valid.
 
 #include "engine/engine_collision_hfield.h"
 
@@ -94,12 +96,12 @@ typedef struct {
   const mjtNum* size;
   const mjtNum* a;
   mjtNum dx, dy, zx, zy, zmin, margin;
-  int nr, nc, rmin, rmax, cmin, cmax;
+  int nc, rmin, rmax, cmin, cmax;
   unsigned char* cells;
 } HFieldQuery;
 
-// Mark surviving leaf cells, then run the original row-major contact pass.
-// Separating search order from contact order preserves deterministic reduction.
+// Mark surviving leaf cells; the row-major contact pass then visits only those.
+// Separating search order from contact order keeps the reduction deterministic.
 static void queryMip(HFieldQuery* q, int level, int row, int col) {
   mjtSize span = (mjtSize)1 << (level+1);
   int rmin = mjMAX(q->rmin, row*span);
@@ -292,7 +294,6 @@ static int clipTriangle(mjtNum output[8][3], const mjtNum* a, const mjtNum* b,
 // for every lower hull facet. The height range bounds both triangle gradients;
 // 1 + |gx| + |gy| bounds sqrt(1 + gx*gx + gy*gy), including contact margin.
 // Stop as soon as this bound cannot reject: loaded contacts usually exit early.
-// No contact selection/order changes, model cache, writes or invalidation rules.
 static int aboveFootprint(const mjtNum* vertices, int nv, const mjtNum size[4],
                           const float* heights, int nr, int nc, mjtNum margin) {
   mjtNum lo[3], hi[3];
@@ -309,8 +310,7 @@ static int aboveFootprint(const mjtNum* vertices, int nv, const mjtNum size[4],
   int cmax = mjMIN(nc-2, (int)mju_floor((hi[0]+size[0])/dx));
   int rmin = mjMAX(0, (int)mju_floor((lo[1]+size[1])/dy));
   int rmax = mjMIN(nr-2, (int)mju_floor((hi[1]+size[1])/dy));
-  // At very small cell areas, or unreasonably large margins, defer entirely to
-  // the reference's normalization and contact arithmetic.
+  // At very small cell areas, or unreasonably large margins, leave it to the prisms.
   if (dx*dy < 1e-12 || margin < 0 || margin > size[0]+size[1]) {
     return 0;
   }
@@ -352,11 +352,11 @@ static int collideTriangle(const mjModel* m, mjData* d, int hid,
   if (m->hfield_mipvalid[hid] && ncell >= 16 && dx*dy >= 1e-12 &&
       margin >= 0 && margin <= size[0]+size[1]) {
     mj_markStack(d);
-    cells = mj_stackAllocByte(d, ncell, 1);
+    cells = mjSTACKALLOC(d, ncell, unsigned char);
     memset(cells, 0, ncell);
     HFieldQuery q = {.m = m, .mip = mipLayout(nr, nc, m->hfield_adr[hid]),
       .size = size, .a = a, .dx = dx, .dy = dy, .zmin = zmin, .margin = margin,
-      .nr = rmax-rmin+1, .nc = cmax-cmin+1, .rmin = rmin, .rmax = rmax,
+      .nc = cmax-cmin+1, .rmin = rmin, .rmax = rmax,
       .cmin = cmin, .cmax = cmax, .cells = cells};
     mjtNum bx = b[0]-a[0], by = b[1]-a[1], bz = b[2]-a[2];
     mjtNum cx = c[0]-a[0], cy = c[1]-a[1], cz = c[2]-a[2];
@@ -426,12 +426,6 @@ int mjc_PolyHField(const mjModel* m, mjData* d, mjPreContact* con,
   mju_sub3(dif, d->geom_xpos + 3*pgeom, hpos);
   mju_mulMatTVec3(pos, hmat, dif);
   mju_mulMatTMat3(mat, hmat, pmat);
-  mjtNum radius = m->geom_rbound[pgeom] + margin;
-  if (pos[0] - radius > size[0] || pos[0] + radius < -size[0] ||
-      pos[1] - radius > size[1] || pos[1] + radius < -size[1] ||
-      pos[2] - radius > size[2] || pos[2] + radius < -size[3]) {
-    return 0;
-  }
 
   mj_markStack(d);
   int nv = type == mjGEOM_BOX ? 8 : m->mesh_vertnum[mesh];
@@ -560,6 +554,7 @@ typedef struct {
   const float* data;
   int nr, nc;
   mjtNum sx, sy, sz;  // half extents and height scale (hfield_size[0..2])
+  mjtNum base;        // depth of the solid below z = 0 (hfield_size[3])
   mjtNum dx, dy;      // cell size
   mjtNum idx, idy;    // and its reciprocals
   mjtNum crease;      // smallest slope change that counts as a crease (above float rounding)
@@ -605,6 +600,14 @@ static inline void sampleGradient(const HGrid* g, int r, int c, mjtNum grad[2]) 
   grad[1] = (g->data[(mjtSize)r1*g->nc + c] - g->data[(mjtSize)r0*g->nc + c])*sy;
 }
 
+// Unit normal of the surface z = h(x, y) with gradient (gx, gy).
+static inline void slopeNormal(mjtNum gx, mjtNum gy, mjtNum normal[3]) {
+  mjtNum scale = 1 / sqrt(1 + gx*gx + gy*gy);
+  normal[0] = -gx*scale;
+  normal[1] = -gy*scale;
+  normal[2] = scale;
+}
+
 // Smooth unit normal: bilinear blend of the four sample gradients of the cell.
 static void gridNormal(const HGrid* g, mjtNum x, mjtNum y, mjtNum normal[3]) {
   int r, c;
@@ -617,10 +620,7 @@ static void gridNormal(const HGrid* g, mjtNum x, mjtNum y, mjtNum normal[3]) {
   mjtNum w00 = (1 - u)*(1 - v), w10 = u*(1 - v), w01 = (1 - u)*v, w11 = u*v;
   mjtNum gx = w00*g00[0] + w10*g10[0] + w01*g01[0] + w11*g11[0];
   mjtNum gy = w00*g00[1] + w10*g10[1] + w01*g01[1] + w11*g11[1];
-  mjtNum scale = 1 / sqrt(1 + gx*gx + gy*gy);
-  normal[0] = -gx*scale;
-  normal[1] = -gy*scale;
-  normal[2] = scale;
+  slopeNormal(gx, gy, normal);
 }
 
 // Unit normal of one of cell (r, c)'s triangles: upper (v >= u) or lower.
@@ -629,10 +629,7 @@ static void triangleNormal(const HGrid* g, int r, int c, int upper, mjtNum norma
   mjtNum h01 = sampleZ(g, r + 1, c), h11 = sampleZ(g, r + 1, c + 1);
   mjtNum gx = upper ? (h11 - h01)*g->idx : (h10 - h00)*g->idx;
   mjtNum gy = upper ? (h01 - h00)*g->idy : (h11 - h10)*g->idy;
-  mjtNum scale = 1 / sqrt(1 + gx*gx + gy*gy);
-  normal[0] = -gx*scale;
-  normal[1] = -gy*scale;
-  normal[2] = scale;
+  slopeNormal(gx, gy, normal);
 }
 
 
@@ -663,10 +660,10 @@ typedef struct {
   mjtNum prefilter;  // vertical gaps above this cannot be within margin (see clearsFootprint)
 } HCandidates;
 
-static void initCandidates(HCandidates* set, mjData* d, int estimate, mjtNum margin,
+static void initCandidates(HCandidates* set, mjData* d, mjtNum estimate, mjtNum margin,
                            mjtNum prefilter) {
-  set->cap = mjMIN(estimate, HCANDIDATES);
-  set->list = mj_stackAllocByte(d, sizeof(HCandidate)*(set->cap + 1), sizeof(mjtNum));
+  set->cap = estimate < HCANDIDATES ? (int)estimate : HCANDIDATES;
+  set->list = mjSTACKALLOC(d, set->cap + 1, HCandidate);
   set->n = 0;
   set->other.order = -1;
   set->arrived = 0;
@@ -828,10 +825,9 @@ static void footprintCells(const HGrid* g, const mjtNum lo[2], const mjtNum hi[2
 
 // The geom must lie over the grid interior and above the base; otherwise the solid
 // prisms' side and bottom walls apply and the caller falls back to them.
-static int insideGrid(const HGrid* g, const mjtNum lo[3], const mjtNum hi[3], mjtNum base,
-                      mjtNum margin) {
+static int insideGrid(const HGrid* g, const mjtNum lo[3], const mjtNum hi[3], mjtNum margin) {
   return lo[0] > -g->sx + margin && hi[0] < g->sx - margin &&
-         lo[1] > -g->sy + margin && hi[1] < g->sy - margin && lo[2] > -base + margin;
+         lo[1] > -g->sy + margin && hi[1] < g->sy - margin && lo[2] > -g->base + margin;
 }
 
 // Height range over the footprint's samples and the ring around them (their central
@@ -943,10 +939,11 @@ static inline mjtNum edgeGap(const HGrid* g, const mjtNum* a, const mjtNum* b, m
 // lines (U = k, V = k, U - V = k in cell units). A crossing joins the support polygon
 // only where the line is a ridge: the terrain's slope along the edge drops across it.
 // The edge is straight, so that is the clearance's second difference, and it does not
-// depend on how the geom is tilted.
+// depend on how the geom is tilted. A crossing higher than `top` (the highest footprint sample
+// plus the prefilter, and a rounding guard) is beyond the margin, so the terrain is not sampled.
 static void addEdgeCrossings(const HGrid* g, HCandidates* set, const mjtNum* a,
-                             const mjtNum* b) {
-  mjtNum len = sqrt((b[0] - a[0])*(b[0] - a[0]) + (b[1] - a[1])*(b[1] - a[1]));
+                             const mjtNum* b, mjtNum top) {
+  mjtNum len = -1;  // measured on first use
   mjtNum Ua = (a[0] + g->sx)*g->idx, Va = (a[1] + g->sy)*g->idy;
   mjtNum Ub = (b[0] + g->sx)*g->idx, Vb = (b[1] + g->sy)*g->idy;
   mjtNum fa[3] = {Ua, Va, Ua - Va}, fb[3] = {Ub, Vb, Ub - Vb};
@@ -959,11 +956,17 @@ static void addEdgeCrossings(const HGrid* g, HCandidates* set, const mjtNum* a,
     for (int k = hfloor(lo) + 1; k < hi; k++) {
       mjtNum t = (k - fa[f]) / (fb[f] - fa[f]);
       mjtNum point[3] = {a[0] + t*(b[0] - a[0]), a[1] + t*(b[1] - a[1]), a[2] + t*(b[2] - a[2])};
+      if (point[2] > top) continue;
       HCandidate* c = measureCandidate(g, set, point);
       if (c) {
         // at an end the crossing is the vertex, already a candidate
-        mjtNum bend = edgeGap(g, a, b, t - eps) + edgeGap(g, a, b, t + eps) - 2*c->gap;
-        c->eligible = t > eps && t < 1 - eps && bend > g->crease*eps*len;
+        if (t > eps && t < 1 - eps) {
+          if (len < 0) {
+            len = sqrt((b[0] - a[0])*(b[0] - a[0]) + (b[1] - a[1])*(b[1] - a[1]));
+          }
+          mjtNum bend = edgeGap(g, a, b, t - eps) + edgeGap(g, a, b, t + eps) - 2*c->gap;
+          c->eligible = bend > g->crease*eps*len;
+        }
         keepCandidate(set, c);
       }
     }
@@ -975,19 +978,13 @@ static void addEdgeCrossings(const HGrid* g, HCandidates* set, const mjtNum* a,
 // highest footprint sample plus the prefilter), so the lower polygons around those
 // vertices carry them all.
 static int smoothPolytope(const mjModel* m, mjData* d, mjPreContact* con, int hgeom, int g,
-                          mjtNum margin, const HGrid* grid, mjtNum base) {
+                          mjtNum margin, const HGrid* grid) {
   int type = m->geom_type[g], mesh = m->geom_dataid[g];
   if (type == mjGEOM_MESH && (mesh < 0 || m->mesh_polynum[mesh] <= 0)) {
     return -1;
   }
   mjtNum pos[3], mat[9];
   relativePose(d, hgeom, g, pos, mat);
-  mjtNum radius = m->geom_rbound[g] + margin;
-  if (pos[0] - radius > grid->sx || pos[0] + radius < -grid->sx ||
-      pos[1] - radius > grid->sy || pos[1] + radius < -grid->sy ||
-      pos[2] - radius > grid->sz || pos[2] + radius < -base) {
-    return 0;
-  }
   HHull hull = {m, mesh, type == mjGEOM_BOX ? 8 : m->mesh_vertnum[mesh],
                 type == mjGEOM_BOX ? 6 : m->mesh_polynum[mesh],
                 type == mjGEOM_MESH ? m->mesh_vert + 3*m->mesh_vertadr[mesh] : NULL,
@@ -1006,7 +1003,7 @@ static int smoothPolytope(const mjModel* m, mjData* d, mjPreContact* con, int hg
     lo[k] = pos[k] + center[k] - extent;
     hi[k] = pos[k] + center[k] + extent;
   }
-  if (!insideGrid(grid, lo, hi, base, margin)) {
+  if (!insideGrid(grid, lo, hi, margin)) {
     return -1;
   }
 
@@ -1014,7 +1011,7 @@ static int smoothPolytope(const mjModel* m, mjData* d, mjPreContact* con, int hg
   mjtNum* vert = mj_stackAllocNum(d, 3*nv);
   int* local = mj_stackAllocInt(d, nv);         // index among the expanded vertices, or -1
   int* key = mj_stackAllocInt(d, 3*nv);         // lattice column, row and diagonal band
-  unsigned char* mark = mj_stackAllocByte(d, npoly, 1);  // 0 new, 1 not lower, 2 lower
+  unsigned char* mark = mjSTACKALLOC(d, npoly, unsigned char);  // 0 new, 1 not lower, 2 lower
   memset(mark, 0, npoly);
 
   // heights of every vertex (one row of the rotation)
@@ -1078,8 +1075,7 @@ static int smoothPolytope(const mjModel* m, mjData* d, mjPreContact* con, int hg
   mjtNum estimate = nexpanded + (mjtNum)(rmax - rmin + 2)*(cmax - cmin + 2) +
                     (mjtNum)nside*(2*(wu + wv) + 3);
   HCandidates set;
-  initCandidates(&set, d, estimate < HCANDIDATES ? (int)estimate : HCANDIDATES, margin,
-                 prefilter);
+  initCandidates(&set, d, estimate, margin, prefilter);
 
   // (1) lower vertices in the band
   for (int k = 0; k < nexpanded; k++) {
@@ -1100,7 +1096,7 @@ static int smoothPolytope(const mjModel* m, mjData* d, mjPreContact* con, int hg
       mjtNum h = sampleZ(grid, r, c);
       if (zmin - h > prefilter) continue;
       if (!plane) {
-        plane = mj_stackAllocByte(d, sizeof(HPlane)*(nface + 1), sizeof(mjtNum));
+        plane = mjSTACKALLOC(d, nface + 1, HPlane);
         for (int k = 0; k < nface; k++) {
           mjtNum n[3], w[3];
           int count;
@@ -1149,26 +1145,25 @@ static int smoothPolytope(const mjModel* m, mjData* d, mjPreContact* con, int hg
   // usually about half full, and it can never overflow)
   int slots = 16;
   while (slots < nside) slots *= 2;
-  unsigned long long* seen = mj_stackAllocByte(d, sizeof(unsigned long long)*slots,
-                                               sizeof(unsigned long long));
+  unsigned long long* seen = mjSTACKALLOC(d, slots, unsigned long long);
   memset(seen, 0, sizeof(unsigned long long)*slots);
   for (int k = 0; k < nface; k++) {
     int count;
     const int* ids = hullPolygon(&hull, face[k], &count);
     for (int j = 0, i0 = ids[count - 1]; j < count; i0 = ids[j++]) {
       int i1 = ids[j];
-      const mjtNum *a = vert + 3*i0, *b = vert + 3*i1;
-      if (hmin(a[2], b[2]) > top) continue;
       // an edge within one cell of every line family crosses no line
       if (key[3*i0] == key[3*i1] && key[3*i0 + 1] == key[3*i1 + 1] &&
           key[3*i0 + 2] == key[3*i1 + 2]) continue;
+      const mjtNum *a = vert + 3*i0, *b = vert + 3*i1;
+      if (hmin(a[2], b[2]) > top) continue;
       unsigned long long pair = (unsigned long long)mjMIN(local[i0], local[i1])*nexpanded +
                                 mjMAX(local[i0], local[i1]) + 1;
       int slot = (int)((pair*0x9E3779B97F4A7C15ULL) >> 40) & (slots - 1);
       while (seen[slot] && seen[slot] != pair) slot = (slot + 1) & (slots - 1);
       if (seen[slot]) continue;
       seen[slot] = pair;
-      addEdgeCrossings(grid, &set, a, b);
+      addEdgeCrossings(grid, &set, a, b, top + 1e-9*(1 + fabs(top)));
     }
   }
 
@@ -1254,11 +1249,18 @@ static void supportOnTerrain(const HGrid* g, const HSmoothShape* s, mjtNum point
 // geom's lower surface is convex, so the gap is unimodal along the edge. Nine samples over
 // the part of the edge under the geom's box (lo, hi), then a golden-section search around
 // the best one.
+static inline mjtNum edgeClearance(const HSmoothShape* s, const mjtNum p0[3], const mjtNum p1[3],
+                                   mjtNum t) {
+  return shapeBottom(s, p0[0] + t*(p1[0] - p0[0]), p0[1] + t*(p1[1] - p0[1])) -
+         (p0[2] + t*(p1[2] - p0[2]));
+}
+
 static void addEdgeMinimum(const HGrid* g, HCandidates* set, const HSmoothShape* s,
                            int r0, int c0, int r1, int c1, const mjtNum lo[2],
                            const mjtNum hi[2]) {
   mjtNum x0 = c0*g->dx - g->sx, y0 = r0*g->dy - g->sy, z0 = sampleZ(g, r0, c0);
   mjtNum x1 = c1*g->dx - g->sx, y1 = r1*g->dy - g->sy, z1 = sampleZ(g, r1, c1);
+  mjtNum e0[3] = {x0, y0, z0}, e1[3] = {x1, y1, z1};
   mjtNum ta = 0, tb = 1, p0[2] = {x0, y0}, dp[2] = {x1 - x0, y1 - y0};
   for (int k = 0; k < 2; k++) {
     if (fabs(dp[k]) < mjMINVAL) {
@@ -1275,7 +1277,7 @@ static void addEdgeMinimum(const HGrid* g, HCandidates* set, const HSmoothShape*
   mjtNum span = tb - ta, best = mjMAXVAL, tbest = ta;
   for (int i = 0; i <= 8; i++) {
     mjtNum t = ta + span*i/8.0;
-    mjtNum f = shapeBottom(s, x0 + t*(x1 - x0), y0 + t*(y1 - y0)) - (z0 + t*(z1 - z0));
+    mjtNum f = edgeClearance(s, e0, e1, t);
     if (f < best) {
       best = f;
       tbest = t;
@@ -1287,17 +1289,16 @@ static void addEdgeMinimum(const HGrid* g, HCandidates* set, const HSmoothShape*
   const mjtNum phi = 0.6180339887498949;
   mjtNum a = hmax(ta, tbest - 0.125*span), b = hmin(tb, tbest + 0.125*span);
   mjtNum t1 = b - phi*(b - a), t2 = a + phi*(b - a);
-  mjtNum f1 = shapeBottom(s, x0 + t1*(x1 - x0), y0 + t1*(y1 - y0)) - (z0 + t1*(z1 - z0));
-  mjtNum f2 = shapeBottom(s, x0 + t2*(x1 - x0), y0 + t2*(y1 - y0)) - (z0 + t2*(z1 - z0));
+  mjtNum f1 = edgeClearance(s, e0, e1, t1), f2 = edgeClearance(s, e0, e1, t2);
   for (int k = 0; k < 24; k++) {
     if (f1 < f2) {
       b = t2; t2 = t1; f2 = f1;
       t1 = b - phi*(b - a);
-      f1 = shapeBottom(s, x0 + t1*(x1 - x0), y0 + t1*(y1 - y0)) - (z0 + t1*(z1 - z0));
+      f1 = edgeClearance(s, e0, e1, t1);
     } else {
       a = t1; t1 = t2; f1 = f2;
       t2 = a + phi*(b - a);
-      f2 = shapeBottom(s, x0 + t2*(x1 - x0), y0 + t2*(y1 - y0)) - (z0 + t2*(z1 - z0));
+      f2 = edgeClearance(s, e0, e1, t2);
     }
   }
   mjtNum t = f1 < f2 ? t1 : t2;
@@ -1389,16 +1390,10 @@ static int selectCapsule(HCandidates* set, const mjtNum axis[3], mjtNum slack,
 }
 
 static int smoothCurved(const mjModel* m, mjData* d, mjPreContact* con, int hgeom, int g,
-                        mjtNum margin, const HGrid* grid, mjtNum base) {
+                        mjtNum margin, const HGrid* grid) {
   HSmoothShape shape = {.type = m->geom_type[g]};
   relativePose(d, hgeom, g, shape.pos, shape.mat);
   mji_copy3(shape.size, m->geom_size + 3*g);
-  mjtNum radius = m->geom_rbound[g] + margin;
-  if (shape.pos[0] - radius > grid->sx || shape.pos[0] + radius < -grid->sx ||
-      shape.pos[1] - radius > grid->sy || shape.pos[1] + radius < -grid->sy ||
-      shape.pos[2] - radius > grid->sz || shape.pos[2] + radius < -base) {
-    return 0;
-  }
 
   // axis-aligned bounds from the support function
   mjtNum lo[3], hi[3];
@@ -1411,7 +1406,7 @@ static int smoothCurved(const mjModel* m, mjData* d, mjPreContact* con, int hgeo
     shapeSupport(&shape, dir, res);
     lo[j] = res[j];
   }
-  if (!insideGrid(grid, lo, hi, base, margin)) {
+  if (!insideGrid(grid, lo, hi, margin)) {
     return -1;
   }
   int rmin, rmax, cmin, cmax;
@@ -1489,8 +1484,7 @@ static int smoothCurved(const mjModel* m, mjData* d, mjPreContact* con, int hgeo
     estimate += (mjtNum)(rmax - rmin + 2)*(cmax - cmin + 2) + 3*(rmax - rmin + cmax - cmin + 4);
   }
   HCandidates set;
-  initCandidates(&set, d, estimate < HCANDIDATES ? (int)estimate : HCANDIDATES, margin,
-                 prefilter);
+  initCandidates(&set, d, estimate, margin, prefilter);
   for (int i = 0; i < nplane; i++) {
     addCandidate(grid, &set, points[i], 1);
   }
@@ -1614,7 +1608,7 @@ int mjc_SmoothHField(const mjModel* m, mjData* d, mjPreContact* con, int hgeom, 
   int hid = m->geom_dataid[hgeom];
   const mjtNum* size = m->hfield_size + 4*hid;
   HGrid grid = {m->hfield_data + m->hfield_adr[hid], m->hfield_nrow[hid], m->hfield_ncol[hid],
-                size[0], size[1], size[2], 0, 0, 0, 0, 0};
+                size[0], size[1], size[2], size[3], 0, 0, 0, 0, 0};
   if (grid.nr < 2 || grid.nc < 2) {
     return -1;
   }
@@ -1629,12 +1623,12 @@ int mjc_SmoothHField(const mjModel* m, mjData* d, mjPreContact* con, int hgeom, 
   switch (m->geom_type[g]) {
   case mjGEOM_BOX:
   case mjGEOM_MESH:
-    return smoothPolytope(m, d, con, hgeom, g, margin, &grid, size[3]);
+    return smoothPolytope(m, d, con, hgeom, g, margin, &grid);
   case mjGEOM_SPHERE:
   case mjGEOM_CAPSULE:
   case mjGEOM_ELLIPSOID:
   case mjGEOM_CYLINDER:
-    return smoothCurved(m, d, con, hgeom, g, margin, &grid, size[3]);
+    return smoothCurved(m, d, con, hgeom, g, margin, &grid);
   default:
     return -1;
   }
