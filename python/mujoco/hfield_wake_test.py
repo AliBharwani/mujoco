@@ -14,7 +14,6 @@ def api():
                                     ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
   lib.mjf_wakeHfieldRegion.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
                                      ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
-  lib.mjf_enableHfieldMip.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
   return lib
 
 
@@ -47,7 +46,6 @@ class HfieldWakeTest(unittest.TestCase):
 
   def settled(self, **kwargs):
     m = model(**kwargs); d = mj.MjData(m)
-    self.assertEqual(self.lib.mjf_enableHfieldMip(m._address, 0, 1), 0)
     if kwargs.get('rotated'):
       # Keep the unrelated never-sleep body on the same transformed field.
       adr = m.jnt_qposadr[m.body_jntadr[m.body('humanoid').id]]

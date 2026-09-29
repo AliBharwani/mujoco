@@ -691,9 +691,7 @@ typedef struct mjModel_ {
   int*      hfield_ncol;          // number of columns in grid                (nhfield x 1)
   int*      hfield_adr;           // address in hfield_data                   (nhfield x 1)
   float*    hfield_data;          // elevation data                           (nhfielddata x 1)
-  float*    hfield_mipmin;        // conservative tile minima                 (nhfielddata x 1)
-  float*    hfield_mipmax;        // conservative tile maxima                 (nhfielddata x 1)
-  mjtByte*  hfield_mipvalid;      // opt-in cache; raw writes require refresh  (nhfield x 1)
+  mjtByte*  hfield_collider;      // convex collider: 0 smooth, 1 upstream    (nhfield x 1)
   int*      hfield_pathadr;       // address of hfield asset path; -1: none   (nhfield x 1)
 
   // textures

@@ -24,8 +24,6 @@
 #include <mujoco/mjmacro.h>
 #include <mujoco/mjmodel.h>
 #include "engine/engine_collision_gjk.h"
-#include "engine/engine_collision_hfield.h"
-#include <mujoco/mjfeather.h>
 #include "engine/engine_macro.h"
 #include "engine/engine_memory.h"
 #include "engine/engine_inline.h"
@@ -1173,21 +1171,6 @@ int mjc_ConvexHField(const mjModel* m, mjData* d, mjPreContact* con, int g1, int
       (size1 < local_pos[1] - radius) || (-size1 > local_pos[1] + radius) ||
       (size2 < local_pos[2] - radius) || (-size3 > local_pos[2] + radius)) {
     return 0;
-  }
-
-  // the fork's colliders over the grid interior; the prisms below take what they decline
-  int collider = mjf_hfieldCollider();
-  if (collider == 0) {
-    int smoothcon = mjc_SmoothHField(m, d, con, g1, g2, margin);
-    if (smoothcon >= 0) {
-      return smoothcon;
-    }
-  }
-  if (collider <= 1) {
-    int polycon = mjc_PolyHField(m, d, con, g1, g2, margin);
-    if (polycon >= 0) {
-      return polycon;
-    }
   }
 
   // ccd set up

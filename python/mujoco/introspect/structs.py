@@ -3837,27 +3837,11 @@ STRUCTS: Mapping[str, StructDecl] = dict([
                  array_extent=('nhfielddata',),
              ),
              StructFieldDecl(
-                 name='hfield_mipmin',
-                 type=PointerType(
-                     inner_type=ValueType(name='float'),
-                 ),
-                 doc='conservative tile minima',
-                 array_extent=('nhfielddata',),
-             ),
-             StructFieldDecl(
-                 name='hfield_mipmax',
-                 type=PointerType(
-                     inner_type=ValueType(name='float'),
-                 ),
-                 doc='conservative tile maxima',
-                 array_extent=('nhfielddata',),
-             ),
-             StructFieldDecl(
-                 name='hfield_mipvalid',
+                 name='hfield_collider',
                  type=PointerType(
                      inner_type=ValueType(name='mjtByte'),
                  ),
-                 doc='opt-in cache; raw writes require refresh',
+                 doc='convex collider: 0 smooth, 1 upstream',
                  array_extent=('nhfield',),
              ),
              StructFieldDecl(

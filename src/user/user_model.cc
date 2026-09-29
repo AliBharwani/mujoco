@@ -47,7 +47,6 @@
 #include <mujoco/mujoco.h>
 #include "cc/array_safety.h"
 #include "engine/engine_core_util.h"
-#include "engine/engine_collision_hfield.h"
 #include "engine/engine_forward.h"
 #include "engine/engine_io.h"
 #include "engine/engine_name.h"
@@ -3915,10 +3914,8 @@ void mjCModel::CopyObjects(mjModel* m) {
     memcpy(m->hfield_data + data_adr, phf->data.data(),
            static_cast<mjtSize>(phf->nrow) * phf->ncol * sizeof(float));
 
-    // Build the acceleration data, but retain the raw-write-compatible path
-    // until the application explicitly adopts the synchronized write API.
-    mjc_updateHFieldMip(m, i, 0, phf->nrow-1, 0, phf->ncol-1);
-    m->hfield_mipvalid[i] = 0;
+    // convex geoms collide with the smooth collider
+    m->hfield_collider[i] = 0;
 
     // advance counter
     data_adr += phf->nrow*phf->ncol;
