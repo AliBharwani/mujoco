@@ -3,10 +3,13 @@
 `mjfeather.h` exposes the fork's integration API. Since integration11, `mjModel`
 carries one fork array, `hfield_collider` (each heightfield's convex collider, see
 [smooth heightfield contacts](FEATHER_HFIELD.md)); integration3's three hfield-cache
-arrays are gone. Regenerate bindings and use a complete matching bundle. `mjData`
-and `mjContact` remain unchanged. The [midphase](FEATHER_MIDPHASE.md) changes
-(node masks, class-grouped body trees, covered body pairs, one-pair collisions)
-are internal and bit-exact.
+arrays are gone. Since integration13, `mjData` ends with one fork field,
+`contactcache` (the [contact reuse](FEATHER_CONTACT_REUSE.md) cache, NULL while
+off), so `sizeof(mjData)` grows by a pointer. Regenerate bindings and use a complete
+matching bundle. `mjContact` remains unchanged. The
+[broadphase and midphase](FEATHER_MIDPHASE.md) changes (node masks, class-grouped body
+trees, covered body pairs, one-pair collisions, the world-axis broadphase) are internal
+and bit-exact; contact reuse is off unless `mjf_setContactReuse` turns it on.
 
 - `mjf_enableTimers(1)` installs a native monotonic wall clock in milliseconds
   (`CLOCK_MONOTONIC` on Linux, `QueryPerformanceCounter` on Windows). It is opt-in

@@ -29,6 +29,8 @@ set(MUJOCO_ENGINE_SRCS
     engine_collision_hfield.h
     engine_collision_primitive.c
     engine_collision_primitive.h
+    engine_collision_reuse.c
+    engine_collision_reuse.h
     engine_collision_sdf.c
     engine_collision_sdf.h
     engine_core_constraint.c

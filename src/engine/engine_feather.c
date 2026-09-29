@@ -15,6 +15,7 @@
 #include <mujoco/mjmacro.h>
 #include <mujoco/mujoco.h>
 #include "engine/engine_collision_hfield.h"
+#include "engine/engine_collision_reuse.h"
 #include "engine/engine_core_constraint.h"
 #include "engine/engine_memory.h"
 #include "engine/engine_sleep.h"
@@ -178,6 +179,8 @@ int mjf_wakeHfieldRegion(const mjModel* m, mjData* d, int id,
       col_start > m->hfield_ncol[id] || row_count > m->hfield_nrow[id]-row_start ||
       col_count > m->hfield_ncol[id]-col_start) return -1;
   if (!row_count || !col_count) return 0;
+  mj_reuseHfieldEdit(m, d, id, row_start, row_start+row_count-1,
+                     col_start, col_start+col_count-1);
   return wakeHfieldRegion(m, d, id, row_start, row_start+row_count-1,
                           col_start, col_start+col_count-1, NULL, 0);
 }
@@ -212,6 +215,7 @@ int mjf_writeHfieldRows(mjModel* m, mjData* d, int id, int row_start,
     }
   }
   if (rmax >= 0) {
+    mj_reuseHfieldEdit(m, d, id, rmin, rmax, cmin, cmax);
     wakeHfieldRegion(m, d, id, rmin, rmax, cmin, cmax, dirty, row_start);
   }
   if (dirty) mj_freeStack(d);

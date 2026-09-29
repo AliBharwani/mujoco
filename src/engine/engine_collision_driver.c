@@ -26,6 +26,7 @@
 #include "engine/engine_collision_gjk.h"
 #include "engine/engine_collision_hfield.h"
 #include "engine/engine_collision_primitive.h"
+#include "engine/engine_collision_reuse.h"
 #include "engine/engine_collision_sdf.h"
 #include "engine/engine_thread.h"
 #include "engine/engine_core_constraint.h"
@@ -753,6 +754,11 @@ void mj_collision(const mjModel* m, mjData* d) {
   // reset the visualization flags
   if (m->vis.global.bvactive) {
     memset(d->bvh_active, 0, m->nbvh);
+  }
+
+  // FEATHER: a new pass of contact reuse
+  if (mj_reuseCache(d)) {
+    mj_reuseBeginStep(mj_reuseCache(d));
   }
 
   mj_markStack(d);
@@ -2343,6 +2349,7 @@ typedef struct {
   int npair;                  // number of collision pairs
   int chunksize;              // number of pairs to process per task
   int maxcon;                 // maximum number of contacts (size of conbuffer)
+  const int* replayed;        // FEATHER: contacts contact reuse replayed per pair, -1: collide
 } mjContactArg;
 
 
@@ -2360,6 +2367,11 @@ static void collisionTask(const mjModel* m, mjData* d, void* arg, int thread_id,
 
   mjc_setCCDBuffer(epabuffer + thread_id * conargs->ccd_size);
   for (int i = 0; i < n; i++) {
+    // FEATHER: contacts replayed from the last collision are already in the buffer
+    if (conargs->replayed && conargs->replayed[globalidx + i] >= 0) {
+      ncon[i] = conargs->replayed[globalidx + i];
+      continue;
+    }
     int g1 = pair[i].geom_geom.g1;
     int g2 = pair[i].geom_geom.g2;
     int ipair = pair[i].geom_geom.ipair;
@@ -2432,12 +2444,40 @@ static void mj_narrowphase(const mjModel* m, mjData* d, const mjcPair* buffer, i
   arg.chunksize = chunksize;
   arg.maxcon = maxcon;
 
+  // FEATHER: replay the pairs contact reuse can, into their place in the buffer
+  struct mjfContactCache_* reuse = mj_reuseCache(d);
+  int* replayed = NULL;
+  if (reuse) {
+    replayed = mjSTACKALLOC(d, npair, int);
+    for (int i = 0; i < npair; i++) {
+      const mjcPair* pair = pairbuffer + i;
+      int g1 = pair->geom_geom.g1, g2 = pair->geom_geom.g2, ipair = pair->geom_geom.ipair;
+      int room = (i + 1 < npair ? pairbuffer[i+1].conpos : maxcon) - pair->conpos;
+      replayed[i] = mj_reuseLookup(m, d, reuse, g1, g2,
+                                   getMargin(m, g1, g2, ipair) + getGap(m, g1, g2, ipair),
+                                   arg.conbuffer + pair->conpos, room);
+    }
+  }
+  arg.replayed = replayed;
+
   // dispatch narrowphase to threads with local stack allocation for EPA
   {
     mj_markStack(d);
     arg.epabuffer = mj_stackAllocByte(d, ccd_size * nthread, sizeof(mjtNum));
     mju_dispatch(m, d, collisionTask, &arg, nchunk);
     mj_freeStack(d);
+  }
+
+  // FEATHER: record the pairs that collided
+  if (reuse) {
+    for (int i = 0; i < npair; i++) {
+      if (replayed[i] < 0) {
+        const mjcPair* pair = pairbuffer + i;
+        int g1 = pair->geom_geom.g1, g2 = pair->geom_geom.g2, ipair = pair->geom_geom.ipair;
+        mj_reuseStore(m, d, reuse, g1, g2, getMargin(m, g1, g2, ipair) + getGap(m, g1, g2, ipair),
+                      arg.conbuffer + pair->conpos, arg.nconbuffer[i]);
+      }
+    }
   }
 
   int ncon = 0;
@@ -2502,16 +2542,24 @@ static void mj_collideGeoms(const mjModel* m, mjData* d, int g1, int g2, char* e
     return;
   }
 
+  // FEATHER: contact reuse replays the pair, or it collides and is recorded
   mjPreContact precon[mjMAXCONPAIR];
-  mjc_setCCDBuffer(epabuffer);
-  int ncon = mjCOLLISIONFUNC[m->geom_type[g1]][m->geom_type[g2]](m, d, precon, g1, g2,
-                                                                  margin + gap);
-  mjc_setCCDBuffer(NULL);
+  struct mjfContactCache_* reuse = mj_reuseCache(d);
+  int ncon = reuse ? mj_reuseLookup(m, d, reuse, g1, g2, margin + gap, precon, maxcon) : -1;
+  if (ncon < 0) {
+    mjc_setCCDBuffer(epabuffer);
+    ncon = mjCOLLISIONFUNC[m->geom_type[g1]][m->geom_type[g2]](m, d, precon, g1, g2,
+                                                               margin + gap);
+    mjc_setCCDBuffer(NULL);
 
-  // SHOULD NOT OCCUR
-  if (ncon > maxcon) {
-    mjERROR("collision function returned %d contacts for geom pair (%d, %d), "
-            "expected at most %d from mj_maxContact", ncon, g1, g2, maxcon);
+    // SHOULD NOT OCCUR
+    if (ncon > maxcon) {
+      mjERROR("collision function returned %d contacts for geom pair (%d, %d), "
+              "expected at most %d from mj_maxContact", ncon, g1, g2, maxcon);
+    }
+    if (reuse) {
+      mj_reuseStore(m, d, reuse, g1, g2, margin + gap, precon, ncon);
+    }
   }
 
   if (!ncon) {

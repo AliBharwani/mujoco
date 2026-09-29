@@ -422,6 +422,9 @@ typedef struct mjData_ {
 
   // compilation signature
   uint64_t  signature;       // also held by the mjSpec that compiled the model
+
+  // FEATHER: contact reuse across steps (mjf_setContactReuse); NULL while off
+  void*     contactcache;    // opaque, owned by this mjData
 } mjData;
 
 
