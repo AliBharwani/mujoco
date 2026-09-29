@@ -390,13 +390,20 @@ static inline void defaultPair(mjcPair* pair, int type) {
 
 // binary search between two bodyflex trees
 static void mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
-                           int merged, int startadr, int pairadr, const int* nodemask);
+                           int merged, int startadr, int pairadr, const int* nodemask,
+                           char* epabuffer);
 
 // compute contacts for a batch of collision pairs contained in a buffer of
 // stride 3 ints (g1, g2, ipair)
 // if buffer is NULL, results are read from arena starting at parena
 static void mj_narrowphase(const mjModel* m, mjData* d, const mjcPair* buffer, int npair,
                            size_t parena);
+
+// FEATHER: collide one geom pair the midphase found, add its contacts to the contact list
+static void mj_collideGeoms(const mjModel* m, mjData* d, int g1, int g2, char* epabuffer);
+
+// FEATHER: size of the nativeccd buffer one collision function call needs
+static int ccdSize(const mjModel* m);
 
 // test a plane geom and a flex for collision, add to contact list
 static void mj_collidePlaneFlex(const mjModel* m, mjData* d, int g, int f);
@@ -592,13 +599,19 @@ static int filterCollisionPair(const mjModel* m, mjData* d, int g1, int g2, int 
 }
 
 
-// FEATHER: per body-BVH node, the OR of geom_contype and the OR of geom_conaffinity over the geoms
-// below it, stored as {contype, conaffinity} at the node's bvh index; allocated on the stack, NULL
-// when no body has a tree. The midphase skips a node pair when no geom below one node can collide
-// with a geom below the other, so it never tests boxes whose every leaf pair the bitmask rejects.
-static int* bodyNodeMasks(const mjModel* m, mjData* d) {
-  int nbody = m->nbody, nnode = 0;
-  for (int b=0; b < nbody; b++) {
+// FEATHER: the midphase's node masks: per body-BVH node, the OR of geom_contype and the OR of
+// geom_conaffinity over the geoms below it, stored as {contype, conaffinity} at the node's bvh
+// index. The midphase skips a node pair when no geom below one node can collide with a geom below
+// the other, so it never tests boxes whose every leaf pair the bitmask rejects. Read from the live
+// geom masks, so a mask edited at runtime holds from the next step.
+//
+// The buffer is stack-allocated per step, NULL when no body has a tree, and a body's masks are
+// filled the first time the body reaches the midphase; a zero root marks a body not filled yet
+// (the compiler leaves visual-only geoms out of the trees, so a filled root is nonzero unless a
+// runtime edit zeroed every geom of the body, which only costs a refill).
+static int* nodeMaskBuffer(const mjModel* m, mjData* d) {
+  int nnode = 0;
+  for (int b=0; b < m->nbody; b++) {
     if (m->body_bvhadr[b] >= 0) {
       nnode = mjMAX(nnode, m->body_bvhadr[b] + m->body_bvhnum[b]);
     }
@@ -608,31 +621,67 @@ static int* bodyNodeMasks(const mjModel* m, mjData* d) {
   }
 
   int* mask = mjSTACKALLOC(d, 2*nnode, int);
-  for (int b=0; b < nbody; b++) {
+  for (int b=0; b < m->nbody; b++) {
     int adr = m->body_bvhadr[b];
-    if (adr < 0) {
-      continue;
-    }
-
-    // the compiler numbers every child after its parent, so a reverse walk fills children first
-    for (int node=m->body_bvhnum[b]-1; node >= 0; node--) {
-      int i = adr + node;
-      const int* child = m->bvh_child + 2*i;
-      if (child[0] < 0 && child[1] < 0) {
-        mask[2*i+0] = m->geom_contype[m->bvh_nodeid[i]];
-        mask[2*i+1] = m->geom_conaffinity[m->bvh_nodeid[i]];
-        continue;
-      }
-      mask[2*i+0] = mask[2*i+1] = 0;
-      for (int k=0; k < 2; k++) {
-        if (child[k] >= 0) {
-          mask[2*i+0] |= mask[2*(adr + child[k]) + 0];
-          mask[2*i+1] |= mask[2*(adr + child[k]) + 1];
-        }
-      }
+    if (adr >= 0) {
+      mask[2*adr] = mask[2*adr + 1] = 0;
     }
   }
   return mask;
+}
+
+
+// fill body b's node masks unless already filled this step
+static void fillNodeMasks(const mjModel* m, int* mask, int b) {
+  int adr = m->body_bvhadr[b];
+  if (mask[2*adr] | mask[2*adr + 1]) {
+    return;
+  }
+
+  // the compiler numbers every child after its parent, so a reverse walk fills children first
+  for (int node=m->body_bvhnum[b]-1; node >= 0; node--) {
+    int i = adr + node;
+    const int* child = m->bvh_child + 2*i;
+    if (child[0] < 0 && child[1] < 0) {
+      mask[2*i+0] = m->geom_contype[m->bvh_nodeid[i]];
+      mask[2*i+1] = m->geom_conaffinity[m->bvh_nodeid[i]];
+      continue;
+    }
+    mask[2*i+0] = mask[2*i+1] = 0;
+    for (int k=0; k < 2; k++) {
+      if (child[k] >= 0) {
+        mask[2*i+0] |= mask[2*(adr + child[k]) + 0];
+        mask[2*i+1] |= mask[2*(adr + child[k]) + 1];
+      }
+    }
+  }
+}
+
+
+// FEATHER: 1 when the explicit pairs merged for bodies b1, b2 (pair rows [pairadr0, pairadr1))
+// list every geom pair of theirs that the bitmask lets collide: every candidate the midphase could
+// find is then one filterCollisionPair drops as a duplicate, and the walk is skipped. Read from the
+// live geom masks each step, so a mask edited at runtime is never skipped past.
+static int coveredByPairs(const mjModel* m, int b1, int b2, int pairadr0, int pairadr1) {
+  int geomend1 = m->body_geomadr[b1] + m->body_geomnum[b1];
+  int geomend2 = m->body_geomadr[b2] + m->body_geomnum[b2];
+  for (int g1=m->body_geomadr[b1]; g1 < geomend1; g1++) {
+    for (int g2=m->body_geomadr[b2]; g2 < geomend2; g2++) {
+      if (filterBitmask(m->geom_contype[g1], m->geom_conaffinity[g1],
+                        m->geom_contype[g2], m->geom_conaffinity[g2])) {
+        continue;
+      }
+      int listed = 0;
+      for (int k=pairadr0; k < pairadr1 && !listed; k++) {
+        listed = (m->pair_geom1[k] == g1 && m->pair_geom2[k] == g2) ||
+                 (m->pair_geom1[k] == g2 && m->pair_geom2[k] == g1);
+      }
+      if (!listed) {
+        return 0;
+      }
+    }
+  }
+  return 1;
 }
 
 
@@ -675,9 +724,15 @@ void mj_collision(const mjModel* m, mjData* d) {
 
   // FEATHER: the midphase's node masks; not under a contact filter, which replaces the bitmask,
   // nor while the visualizer marks active bounding volumes, which a pruned pair would leave unmarked
-  const int* nodemask = NULL;
+  int* nodemask = NULL;
   if (!mjcb_contactfilter && !m->vis.global.bvactive && !mjDISABLED(mjDSBL_MIDPHASE)) {
-    nodemask = bodyNodeMasks(m, d);
+    nodemask = nodeMaskBuffer(m, d);
+  }
+
+  // FEATHER: the nativeccd buffer of the midphase's one-pair collisions (mj_collideGeoms)
+  char* epabuffer = NULL;
+  if (!mjDISABLED(mjDSBL_MIDPHASE)) {
+    epabuffer = mj_stackAllocByte(d, ccdSize(m), sizeof(mjtNum));
   }
 
   // process bodyflex pairs returned by broadphase, merge with predefined geom pairs
@@ -685,6 +740,9 @@ void mj_collision(const mjModel* m, mjData* d) {
 
   // align the arena for candidate collision pairs for narrowphase
   size_t parena = alignArena(d, _Alignof(int));
+
+  // FEATHER: the exclude scan resumes where the last pair left it (both lists sort by signature)
+  int exadr = 0;
 
   for (int i=0; i < nbfpair; i++) {
     // reconstruct bodyflex pair ids
@@ -703,9 +761,13 @@ void mj_collision(const mjModel* m, mjData* d) {
     // merge predefined geom pairs
     int merged = 0;
     int startadr = pairadr;
+    int mergeadr = -1;  // FEATHER: the first row of this pair's own, the rows up to pairadr
     // test all predefined pairs for which pair_signature <= signature
     for (; pairadr < npair && m->pair_signature[pairadr] <= signature; pairadr++) {
       merged = (m->pair_signature[pairadr] == signature);
+      if (merged && mergeadr < 0) {
+        mergeadr = pairadr;
+      }
       g1 = m->pair_geom1[pairadr], g2 = m->pair_geom2[pairadr];
       if (filterCollisionPair(m, d, g1, g2, pairadr, 0, 0, 0)) {
         pushGeomGeom(m, d, g1, g2, pairadr);
@@ -719,7 +781,6 @@ void mj_collision(const mjModel* m, mjData* d) {
     }
 
     // handle body pair exclusion
-    int exadr = 0;
     if (nexclude) {
       // advance exadr while exclude_signature < signature
       while (exadr < nexclude && m->exclude_signature[exadr] < signature) {
@@ -735,6 +796,23 @@ void mj_collision(const mjModel* m, mjData* d) {
     // get bodyflex info
     int isbody1 = (bf1 < nbody);
     int isbody2 = (bf2 < nbody);
+
+    // FEATHER: skip the midphase of a body pair whose explicit pairs cover every geom pair the
+    // bitmask lets collide (not under a contact filter, which replaces the bitmask, nor while the
+    // visualizer marks active bounding volumes). The queued geom pairs are still flushed where the
+    // walk would have flushed them: the batches stay small enough to run on this thread, where
+    // merged ones went to the thread pool and paid its wake-up.
+    if (merged && isbody1 && isbody2 && !mjcb_contactfilter && !m->vis.global.bvactive &&
+        coveredByPairs(m, bf1, bf2, mergeadr, pairadr)) {
+      if (ngeompair > 0 && !mjDISABLED(mjDSBL_MIDPHASE) &&
+          m->body_bvhadr[bf1] >= 0 && m->body_bvhadr[bf2] >= 0 &&
+          (m->body_geomnum[bf1] > 1 || m->body_geomnum[bf2] > 1)) {
+        mj_narrowphase(m, d, NULL, ngeompair, parena);
+        ngeompair = 0;
+        parena = alignArena(d, _Alignof(int));
+      }
+      continue;
+    }
     int bvh1 = (isbody1 ? m->body_bvhadr[bf1] : m->flex_bvhadr[bf1-nbody]);
     int bvh2 = (isbody2 ? m->body_bvhadr[bf2] : m->flex_bvhadr[bf2-nbody]);
     int geomadr1 = (isbody1 ? m->body_geomadr[bf1] : -1);
@@ -756,8 +834,14 @@ void mj_collision(const mjModel* m, mjData* d) {
         ngeompair = 0;
       }
 
+      // FEATHER: the two bodies' node masks, filled on first use this step
+      if (nodemask && isbody1 && isbody2) {
+        fillNodeMasks(m, nodemask, bf1);
+        fillNodeMasks(m, nodemask, bf2);
+      }
+
       int ncon_before = d->ncon;
-      mj_collideTree(m, d, bf1, bf2, merged, startadr, pairadr, nodemask);
+      mj_collideTree(m, d, bf1, bf2, merged, startadr, pairadr, nodemask, epabuffer);
       int ncon_after = d->ncon;
 
       // filter flex contacts (limit per geom-flex or flex-flex pair)
@@ -907,7 +991,7 @@ void mj_collision(const mjModel* m, mjData* d) {
           // select midphase mode
           if (m->flex_selfcollide[f] == mjFLEXSELF_BVH ||
               (m->flex_selfcollide[f] == mjFLEXSELF_AUTO && m->flex_dim[f] == 3)) {
-            mj_collideTree(m, d, nbody+f, nbody+f, 0, 0, 0, NULL);
+            mj_collideTree(m, d, nbody+f, nbody+f, 0, 0, 0, NULL, NULL);
           } else {
             mj_collideFlexSAP(m, d, f);
           }
@@ -1046,7 +1130,8 @@ int mj_collideOBB(const mjtNum aabb1[6], const mjtNum aabb2[6],
 
 // binary search between two bodyflex trees
 static void mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
-                           int merged, int startadr, int pairadr, const int* nodemask) {
+                           int merged, int startadr, int pairadr, const int* nodemask,
+                           char* epabuffer) {
   int nbody = m->nbody, nbvhstatic = m->nbvhstatic;
   mjtBool isbody1 = (bf1 < nbody);
   mjtBool isbody2 = (bf2 < nbody);
@@ -1148,11 +1233,7 @@ static void mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
                 n1 = nodeid2;
                 n2 = nodeid1;
               }
-              mjcPair pair;
-              defaultPair(&pair, mjCPAIR_GEOM_GEOM);
-              pair.geom_geom.g1 = n1;
-              pair.geom_geom.g2 = n2;
-              mj_narrowphase(m, d, &pair, 1, 0);
+              mj_collideGeoms(m, d, n1, n2, epabuffer);
             }
             if (mark_active) {
               d->bvh_active[node1 + bvhadr1] = true;
@@ -1958,6 +2039,47 @@ static void mj_makeCapsule(const mjModel* m, mjData* d, int f, const int vid[2],
 }
 
 
+// fill the ncon contacts of geom pair (g1, g2) from its pre-contacts, with explicit pair ipair's
+// parameters (ipair >= 0) or the geoms' own mixed ones
+static void setGeomContacts(const mjModel* m, mjContact* con, const mjPreContact* precon,
+                            int ncon, int g1, int g2, int ipair) {
+  int condim;
+  mjtNum friction[5], solref[mjNREF], solimp[mjNIMP], adhesion;
+  mjtNum solreffriction[mjNREF] = {0};
+
+  if (ipair >= 0) {
+    condim = m->pair_dim[ipair];
+    mju_copy(solref, m->pair_solref+mjNREF*ipair, mjNREF);
+    mju_copy(solimp, m->pair_solimp+mjNIMP*ipair, mjNIMP);
+    mju_copy(friction, m->pair_friction+5*ipair, 5);
+    adhesion = m->pair_adhesion[ipair];
+    if (m->pair_solreffriction[mjNREF*ipair] || m->pair_solreffriction[mjNREF*ipair + 1]) {
+      mju_copy(solreffriction, m->pair_solreffriction+mjNREF*ipair, mjNREF);
+    }
+  } else {
+    mj_contactParam(m, &condim, solref, solimp, friction, &adhesion, g1, g2, -1, -1);
+  }
+
+  mjtNum margin = getMargin(m, g1, g2, ipair);
+  for (int j=0; j < ncon; j++) {
+    mjContact* c = con + j;
+    c->dist = precon[j].dist;
+    mji_copy3(c->pos, precon[j].pos);
+    mji_copy3(c->frame, precon[j].normal);
+    mji_copy3(c->frame + 3, precon[j].tangent);
+    c->geom[0] = g1;
+    c->geom[1] = g2;
+    c->flex[0] = -1;
+    c->flex[1] = -1;
+    c->elem[0] = -1;
+    c->elem[1] = -1;
+    c->vert[0] = -1;
+    c->vert[1] = -1;
+    mj_setContact(m, c, condim, margin, solref, solreffriction, solimp, friction, adhesion);
+  }
+}
+
+
 // struct holding extra data for a flex precontact
 typedef struct {
   int elem[2];
@@ -2019,9 +2141,7 @@ static void collisionTask(const mjModel* m, mjData* d, void* arg, int thread_id,
 static void mj_narrowphase(const mjModel* m, mjData* d, const mjcPair* buffer, int npair,
                            size_t parena) {
   int nthread = mju_numThread(d);
-  int npolygonmax = mjDISABLED(mjDSBL_MULTICCD) ? 0 : m->npolygonmax;
-  int nmeshdegmax = mjDISABLED(mjDSBL_MULTICCD) ? 0 : m->nmeshdegmax;
-  int ccd_size = mjc_ccdSize(npolygonmax, nmeshdegmax, m->opt.ccd_iterations);
+  int ccd_size = ccdSize(m);
   mjtNum margin, gap;
 
   // try to balance load of 5 chunks per thread (chunksize should be divisible by 16)
@@ -2100,47 +2220,65 @@ static void mj_narrowphase(const mjModel* m, mjData* d, const mjcPair* buffer, i
     if (!(ncon = arg.nconbuffer[i]))
       continue;
 
-    int condim;
-    mjtNum friction[5], solref[mjNREF], solimp[mjNIMP], adhesion;
-    mjtNum solreffriction[mjNREF] = {0};
-    int g1 = pairbuffer[i].geom_geom.g1;
-    int g2 = pairbuffer[i].geom_geom.g2;
-    int ipair = pairbuffer[i].geom_geom.ipair;
-
-    if (ipair >= 0) {
-      condim = m->pair_dim[ipair];
-      mju_copy(solref, m->pair_solref+mjNREF*ipair, mjNREF);
-      mju_copy(solimp, m->pair_solimp+mjNIMP*ipair, mjNIMP);
-      mju_copy(friction, m->pair_friction+5*ipair, 5);
-      adhesion = m->pair_adhesion[ipair];
-      if (m->pair_solreffriction[mjNREF*ipair] || m->pair_solreffriction[mjNREF*ipair + 1]) {
-        mju_copy(solreffriction, m->pair_solreffriction+mjNREF*ipair, mjNREF);
-      }
-    } else {
-      mj_contactParam(m, &condim, solref, solimp, friction, &adhesion, g1, g2, -1, -1);
-    }
-
-    mjPreContact* bc = arg.conbuffer + pairbuffer[i].conpos;
-    margin = getMargin(m, g1, g2, ipair);
-    for (int j=0; j < ncon; j++) {
-      mjContact* c = con + conpos + j;
-      c->dist = bc[j].dist;
-      mji_copy3(c->pos, bc[j].pos);
-      mji_copy3(c->frame, bc[j].normal);
-      mji_copy3(c->frame + 3, bc[j].tangent);
-      c->geom[0] = g1;
-      c->geom[1] = g2;
-      c->flex[0] = -1;
-      c->flex[1] = -1;
-      c->elem[0] = -1;
-      c->elem[1] = -1;
-      c->vert[0] = -1;
-      c->vert[1] = -1;
-      mj_setContact(m, c, condim, margin, solref, solreffriction, solimp, friction, adhesion);
-    }
+    setGeomContacts(m, con + conpos, arg.conbuffer + pairbuffer[i].conpos, ncon,
+                    pairbuffer[i].geom_geom.g1, pairbuffer[i].geom_geom.g2,
+                    pairbuffer[i].geom_geom.ipair);
     conpos += ncon;
   }
   mj_freeStack(d);
+}
+
+
+
+// FEATHER: size of the nativeccd buffer one collision function call needs
+static int ccdSize(const mjModel* m) {
+  int npolygonmax = mjDISABLED(mjDSBL_MULTICCD) ? 0 : m->npolygonmax;
+  int nmeshdegmax = mjDISABLED(mjDSBL_MULTICCD) ? 0 : m->nmeshdegmax;
+  return mjc_ccdSize(npolygonmax, nmeshdegmax, m->opt.ccd_iterations);
+}
+
+
+
+// FEATHER: collide one geom pair the midphase found. The collision function writes into a local
+// buffer and the contacts are allocated and filled only when it returns some (most candidates
+// return none), without mj_narrowphase's set-up and dispatch for a batch of one. A pair whose
+// contact bound exceeds mjMAXCONPAIR (SDF), or a call without a buffer, takes mj_narrowphase.
+static void mj_collideGeoms(const mjModel* m, mjData* d, int g1, int g2, char* epabuffer) {
+  mjtNum margin = getMargin(m, g1, g2, -1);
+  mjtNum gap = getGap(m, g1, g2, -1);
+  int maxcon = mj_maxContact(m, g1, g2, margin + gap > 0);
+  if (!epabuffer || maxcon > mjMAXCONPAIR) {
+    mjcPair pair;
+    defaultPair(&pair, mjCPAIR_GEOM_GEOM);
+    pair.geom_geom.g1 = g1;
+    pair.geom_geom.g2 = g2;
+    mj_narrowphase(m, d, &pair, 1, 0);
+    return;
+  }
+
+  mjPreContact precon[mjMAXCONPAIR];
+  mjc_setCCDBuffer(epabuffer);
+  int ncon = mjCOLLISIONFUNC[m->geom_type[g1]][m->geom_type[g2]](m, d, precon, g1, g2,
+                                                                  margin + gap);
+  mjc_setCCDBuffer(NULL);
+
+  // SHOULD NOT OCCUR
+  if (ncon > maxcon) {
+    mjERROR("collision function returned %d contacts for geom pair (%d, %d), "
+            "expected at most %d from mj_maxContact", ncon, g1, g2, maxcon);
+  }
+
+  if (!ncon) {
+    return;
+  }
+  mjContact* con =
+    (mjContact*) mj_arenaAllocByte(d, sizeof(mjContact) * ncon, _Alignof(mjContact));
+  if (!con) {
+    mj_warning(d, mjWARN_CONTACTFULL, d->ncon);
+    return;
+  }
+  d->ncon += ncon;
+  setGeomContacts(m, con, precon, ncon, g1, g2, -1);
 }
 
 

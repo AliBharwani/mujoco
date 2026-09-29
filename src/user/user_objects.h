@@ -171,7 +171,8 @@ struct mjCBoundingVolumeHierarchy_ {
 class mjCBoundingVolumeHierarchy : public mjCBoundingVolumeHierarchy_ {
  public:
   // make bounding volume hierarchy
-  void CreateBVH(mjCModel* model, const mjCBase* owner);
+  // FEATHER: byclass splits the leaves by collision class (contype, conaffinity) before space
+  void CreateBVH(mjCModel* model, const mjCBase* owner, bool byclass = false);
   void Set(double ipos_element[3], double iquat_element[4]);
   void AllocateBoundingVolumes(int nleaf);
   void RemoveInactiveVolumes(int nmax);
@@ -211,6 +212,7 @@ class mjCBoundingVolumeHierarchy : public mjCBoundingVolumeHierarchy_ {
   int MakeBVH(std::vector<BVElement>::iterator elements_begin,
               std::vector<BVElement>::iterator elements_end, int lev,
               mjCModel* model, const mjCBase* owner);
+  bool byclass_ = false;  // FEATHER: CreateBVH's byclass, read by MakeBVH
 };
 
 

@@ -1,52 +1,50 @@
-# Feather: polyhedral heightfield contacts
+# Feather: smooth heightfield contacts
 
-Originally developed on 3.9 and now ported to 3.12, this fork adds an interior top-surface collision path for boxes and meshes
-with compiled convex polygons. It fixes lateral contacts against the internal
-walls of the triangular prisms used by the original heightfield collider.
+Convex geoms against a heightfield's top surface. Upstream treats each cell as a solid triangular
+prism, whose internal side faces give lateral normals even on a flat field. Over the grid interior
+this collider gives a smooth terrain normal and at most four contacts per pair, anchored at hull
+vertices, terrain samples and lattice crossings, never at clipped witnesses.
 
-`mjc_PolyHField` transforms the polyhedron into the heightfield frame, intersects
-its downward-facing hull triangles with the XY footprints of terrain triangles,
-and computes each witness's signed top-plane distance, midpoint, and normal from
-that same plane. Contact reduction retains at most four spatially separated
-witnesses per coplanar patch, including the deepest, subject to the existing
-`mjMAXCONPAIR` cap. Geometry is never modified, so shared models remain usable.
+- Heights stay upstream's triangulated surface (the diagonal from sample (r, c) to (r+1, c+1)).
+  Normals come from a smooth field through the same samples: central-difference gradients at the
+  samples, bilinear inside a cell. They are continuous across cells and exact on any plane, so
+  flat or uniformly sloped terrain reduces to the plane functions.
+- Polytopes (boxes, meshes): against the triangulated heights the clearance is minimal only at
+  lower hull vertices, lattice samples under the lower surface, or crossings of lower edges with
+  the lattice's row, column and diagonal lines, so the deepest candidate is exact. Lattice
+  features join the support polygon only where the terrain bends upward (a ridge line or a peak
+  sample), a property of the terrain alone, so the choice cannot flip while the geom rocks. On a
+  plane the contacts are `mjc_PlaneBox`'s vertices.
+- Spheres, capsules, ellipsoids, cylinders: the plane functions' points, each against the terrain
+  below it on the smooth normals, plus the deepest terrain feature when it is deeper by more than
+  a tenth of the margin. A capsule's side also rests on ridge lines and peak samples.
 
-The original collider handles other primitive types, meshes without compiled
-convex polygons, and a whole pair whenever the polyhedron reaches the field's
-outer walls or underside. Thus the top-normal guarantee applies to the interior
-box/convex-mesh path. This is a discrete contact-generation fix, not swept CCD.
-The original contact correction itself changes no public layouts. The later
-[optional mip acceleration](FEATHER_HFIELD_MIP.md) adds model-owned arrays and
-requires regenerated bindings and an explicit write/refresh contract.
+## Choosing the collider
 
-The 3.9 integration2 build first attempts an uncached whole-polyhedron height
-rejection. It scans samples over the footprint and bounds both height and slope
-so contact margin remains a normal-distance allowance. It stops scanning when
-the bound cannot reject, preserving the original contact traversal and reduction.
-Elevated rack geometry avoids repeated per-facet terrain-triangle construction;
-geometry actually in contact still uses the full top-surface path. There is no
-height cache or additional write/invalidation contract in that original path. Tiny cell areas and
-unsupported margins retain the reference path.
+`mjModel.hfield_collider` holds one byte per heightfield: 0, the compiled default, is this
+collider over the interior; 1 is upstream's prisms throughout. Set and read it with
+`mjf_setHfieldCollider(m, id, collider)` and `mjf_hfieldCollider(m, id)`, while no collision runs
+on the model. `mjc_SmoothHField` is the collision table's heightfield entry; it hands the side
+walls, the underside, unsupported geoms and fields set to 1 to upstream's `mjc_ConvexHField`. The
+footprint of a geom over the field (`mjc_hfieldGeomBox`) is shared by the collider and the
+regional wake ([FEATHER_REGION_WAKE.md](FEATHER_REGION_WAKE.md)).
 
-Run `python/mujoco/hfield_test.py` against bindings linked to this build. It covers
-flat cell seams, both CCD flag settings, three resolutions, margins, five-second
-passive drift, slopes, ridges/valleys, arbitrary orientations, rotated fields,
-dense nonplanar terrain, and preservation of outer-wall/underside contacts.
-Six of the original eight tests fail on stock 3.9. Two additional regressions
-cover normal-distance margin above a steep ridge and live writes after a rejected
-pair. Also run the
-upstream collision, ray, and sleep tests. The ray tests require the normal CTest
-`MUJOCO_PLUGIN_DIR` environment to find the SDF plugin.
+Integration11 deleted the earlier paths: the polyhedral top-surface collider (`mjc_PolyHField`),
+face clipping, the min/max height pyramid and its three model arrays, and the process-global
+collider switch.
 
-Use matching source and headers for Linux, Windows, and Python builds. Swapping
-a GCC/libstdc++ engine into the official libc++ Python wheel is unsafe for
-`MjSpec`; rebuild Python extensions with the engine's toolchain. Plain C ABI
-compatibility does not make the C++ objects behind MjSpec compatible.
+## Tests
 
-The accompanying one-line MJZ warning fix converts filesystem paths to narrow
-strings before passing them to `%s`, which permits the LLVM-MinGW Windows build.
-It changes neither the simulation nor its ABI.
+Run `python/mujoco/hfield_test.py` and `python/mujoco/hfield_wake_test.py` against bindings linked
+to this build, plus the upstream collision, ray and sleep tests. The ray tests need the normal
+CTest `MUJOCO_PLUGIN_DIR` environment to find the SDF plugin.
 
-Application acceptance remains a separate test: compare the original frozen
-flat-heightfield stance probe to the box floor with the same policy and contact
-parameters. Passive geometry tests do not establish closed-loop policy behavior.
+## Toolchain notes
+
+Use matching source and headers for Linux, Windows, and Python builds. Swapping a GCC/libstdc++
+engine into the official libc++ Python wheel is unsafe for `MjSpec`; rebuild Python extensions
+with the engine's toolchain. Plain C ABI compatibility does not make the C++ objects behind
+MjSpec compatible.
+
+The one-line MJZ warning fix converts filesystem paths to narrow strings before passing them to
+`%s`, which permits the LLVM-MinGW Windows build. It changes neither the simulation nor its ABI.
