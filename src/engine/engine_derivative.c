@@ -2392,8 +2392,11 @@ void mjd_actuator_vel(const mjModel* m, mjData* d) {
 
     // affine bias
     if (m->actuator_biastype[i] == mjBIAS_AFFINE) {
-      // extract bias info: prm = [const, kp, kv]
-      bias_vel = (m->actuator_biasprm + mjNBIAS*i)[2];
+      // extract bias info: prm = [const, kp, kv, vsat]
+      const mjtNum* prm = m->actuator_biasprm + mjNBIAS*i;
+
+      // Feather speed-shaped brake: beyond vsat the velocity term is constant, so its derivative is 0
+      bias_vel = (prm[3] > 0 && mju_abs(d->actuator_velocity[oadr]) >= prm[3]) ? 0 : prm[2];
     }
 
     // SO3 geodesic servo: kv term, applied to each output row below

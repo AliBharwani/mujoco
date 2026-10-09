@@ -826,10 +826,17 @@ void mj_fwdActuation(const mjModel* m, mjData* d) {
       bias = 0.0;
       break;
 
-    case mjBIAS_AFFINE:             // affine: biasprm = [const, kp, kv]
+    case mjBIAS_AFFINE: {           // affine: biasprm = [const, kp, kv, vsat]
+      // Feather: vsat > 0 saturates the velocity term at |velocity| = vsat, a speed-shaped brake (kv*velocity inside
+      // the band, constant beyond it); vsat = 0 is upstream's affine bias, operation for operation
+      mjtNum velocity = d->actuator_velocity[oadr];
+      if (biasprm[3] > 0) {
+        velocity = mju_clip(velocity, -biasprm[3], biasprm[3]);
+      }
       bias = biasprm[0] + biasprm[1]*d->actuator_length[oadr] +
-             biasprm[2]*d->actuator_velocity[oadr];
+             biasprm[2]*velocity;
       break;
+    }
 
     case mjBIAS_MUSCLE:             // muscle passive force
       bias =  mju_muscleBias(d->actuator_length[oadr],
