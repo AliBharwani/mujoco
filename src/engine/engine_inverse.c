@@ -28,6 +28,7 @@
 #include "engine/engine_memory.h"
 #include "engine/engine_macro.h"
 #include "engine/engine_forward.h"
+#include "engine/engine_passive.h"
 #include "engine/engine_sensor.h"
 #include "engine/engine_support.h"
 #include "engine/engine_util_blas.h"
@@ -87,6 +88,7 @@ void mj_invVelocity(const mjModel* m, mjData* d) {
 static void mj_discreteAcc(const mjModel* m, mjData* d) {
   int nv = m->nv, nC = m->nC, nD = m->nD, dof_damping;
   mjtNum *qacc = d->qacc;
+  int enbl_friction = !mjDISABLED(mjDSBL_DAMPER) && !mjDISABLED(mjDSBL_FRICTIONLOSS);
 
   mj_markStack(d);
   mjtNum* qfrc = mjSTACKALLOC(d, nv, mjtNum);
@@ -105,7 +107,8 @@ static void mj_discreteAcc(const mjModel* m, mjData* d) {
       for (int i=0; i < nv; i++) {
         if (m->dof_damping[i] > 0 ||
             !mju_isZero(m->dof_dampingpoly + mjNPOLY*i, mjNPOLY) ||
-            m->jnt_actuatorid[m->dof_jntid[i]] != -1) {
+            m->jnt_actuatorid[m->dof_jntid[i]] != -1 ||
+            (enbl_friction && m->dof_frictionloss[i] < 0)) {
           dof_damping = 1;
           break;
         }
@@ -127,6 +130,11 @@ static void mj_discreteAcc(const mjModel* m, mjData* d) {
       mjtNum damping = m->dof_damping[i]
                        + mj_actuatorDamping(m, mjOBJ_JOINT, m->dof_jntid[i], poly);
       mjtNum damp_deriv = mjd_xPolyForce(damping, poly, v, mjNPOLY, 1);
+
+      // Feather: smooth passive friction's slope, as mj_EulerSkip integrates it
+      if (enbl_friction && m->dof_frictionloss[i] < 0) {
+        damp_deriv -= mj_frictionSlope(m->dof_frictionloss[i], v);
+      }
       qfrc[i] += m->opt.timestep * damp_deriv * d->qacc[i];
     }
     break;

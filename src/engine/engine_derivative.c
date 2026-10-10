@@ -3090,10 +3090,9 @@ void mjd_passive_vel(const mjModel* m, mjData* d) {
     int adr = m->D_rowadr[i] + m->D_diag[i];
     d->qDeriv[adr] -= mjd_xPolyForce(damping, poly, v, mjNPOLY, 1);
 
-    // Feather: smooth passive friction's slope, F / v0 * (1 - tanh^2(v / v0))
+    // Feather: smooth passive friction's slope
     if (enbl_friction && m->dof_frictionloss[i] < 0) {
-      mjtNum t = mju_tanh(v / mjPASSIVE_FRICTION_V0);
-      d->qDeriv[adr] += m->dof_frictionloss[i] / mjPASSIVE_FRICTION_V0 * (1 - t*t);
+      d->qDeriv[adr] += mj_frictionSlope(m->dof_frictionloss[i], v);
     }
   }
 

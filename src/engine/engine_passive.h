@@ -25,11 +25,15 @@ extern "C" {
 
 //------------------------- passive forces ---------------------------------------------------------
 
-// Feather: a negative dof_frictionloss is a smooth passive friction of that size, F * tanh(v / v0), applied with
-// the dof dampers and differentiated for the implicit integrators; it adds no constraint row. Keep v0 above one
-// step's friction impulse over the dof's inertia (timestep * F / I): below it a dof near rest chatters, its
-// velocity flipping sign every step
+// Feather: a negative dof_frictionloss is a smooth passive friction of that size, F * tanh(v / v0) (v0 in rad/s,
+// m/s on a slide dof), applied with the dof dampers (off with mjDSBL_DAMPER or mjDSBL_FRICTIONLOSS); its slope
+// enters the implicit integrators, Euler's implicit damping and the discrete inverse; it adds no constraint row.
+// One step's friction impulse over the dof's inertia (timestep * F / I) must stay under about 5 v0: beyond, a
+// dof near rest chatters, its velocity flipping sign every step (2 v0 for the law integrated explicitly)
 #define mjPASSIVE_FRICTION_V0 0.05
+
+// Feather: slope d/dv of the smooth passive friction F * tanh(v / v0) of a dof with frictionloss F < 0
+mjtNum mj_frictionSlope(mjtNum frictionloss, mjtNum v);
 
 // all passive forces
 MJAPI void mj_passive(const mjModel* m, mjData* d);

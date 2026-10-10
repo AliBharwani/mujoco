@@ -1460,8 +1460,7 @@ void mj_EulerSkip(const mjModel* m, mjData* d, int skipfactor) {
 
         // Feather: smooth passive friction's slope (a negative frictionloss)
         if (enbl_friction && m->dof_frictionloss[i] < 0) {
-          mjtNum t = mju_tanh(qv / mjPASSIVE_FRICTION_V0);
-          damp_deriv -= m->dof_frictionloss[i] / mjPASSIVE_FRICTION_V0 * (1 - t*t);
+          damp_deriv -= mj_frictionSlope(m->dof_frictionloss[i], qv);
         }
         d->qH[m->M_rowadr[i] + m->M_rownnz[i] - 1] += m->opt.timestep * damp_deriv;
       }
