@@ -1415,12 +1415,14 @@ void mj_EulerSkip(const mjModel* m, mjData* d, int skipfactor) {
 
   // check for dof damping if disable flag is not set
   int dof_damping = 0;
+  int enbl_friction = !mjDISABLED(mjDSBL_FRICTIONLOSS);
   if (!mjDISABLED(mjDSBL_EULERDAMP) && !mjDISABLED(mjDSBL_DAMPER)) {
     for (int v=0; v < nv; v++) {
       int i = sleep_filter ? dof_awake_ind[v] : v;
       if (m->dof_damping[i] > 0 ||
           !mju_isZero(m->dof_dampingpoly + mjNPOLY*i, mjNPOLY) ||
-          m->jnt_actuatorid[m->dof_jntid[i]] != -1) {
+          m->jnt_actuatorid[m->dof_jntid[i]] != -1 ||
+          (enbl_friction && m->dof_frictionloss[i] < 0)) {
         dof_damping = 1;
         break;
       }
@@ -1455,6 +1457,12 @@ void mj_EulerSkip(const mjModel* m, mjData* d, int skipfactor) {
         mjtNum damping = m->dof_damping[i]
                          + mj_actuatorDamping(m, mjOBJ_JOINT, m->dof_jntid[i], poly);
         mjtNum damp_deriv = mjd_xPolyForce(damping, poly, qv, mjNPOLY, 1);
+
+        // Feather: smooth passive friction's slope (a negative frictionloss)
+        if (enbl_friction && m->dof_frictionloss[i] < 0) {
+          mjtNum t = mju_tanh(qv / mjPASSIVE_FRICTION_V0);
+          damp_deriv -= m->dof_frictionloss[i] / mjPASSIVE_FRICTION_V0 * (1 - t*t);
+        }
         d->qH[m->M_rowadr[i] + m->M_rownnz[i] - 1] += m->opt.timestep * damp_deriv;
       }
 

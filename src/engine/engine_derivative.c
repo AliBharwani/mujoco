@@ -3080,6 +3080,7 @@ void mjd_passive_vel(const mjModel* m, mjData* d) {
   // dof damping
   int nv = m->nv;
   int nv_awake = sleep_filter ? d->nv_awake : nv;
+  int enbl_friction = !mjDISABLED(mjDSBL_FRICTIONLOSS);
   for (int j = 0; j < nv_awake; j++) {
     int i = sleep_filter ? d->dof_awake_ind[j] : j;
     mjtNum v = d->qvel[i];
@@ -3088,6 +3089,12 @@ void mjd_passive_vel(const mjModel* m, mjData* d) {
     mjtNum damping = m->dof_damping[i] + mj_actuatorDamping(m, mjOBJ_JOINT, m->dof_jntid[i], poly);
     int adr = m->D_rowadr[i] + m->D_diag[i];
     d->qDeriv[adr] -= mjd_xPolyForce(damping, poly, v, mjNPOLY, 1);
+
+    // Feather: smooth passive friction's slope, F / v0 * (1 - tanh^2(v / v0))
+    if (enbl_friction && m->dof_frictionloss[i] < 0) {
+      mjtNum t = mju_tanh(v / mjPASSIVE_FRICTION_V0);
+      d->qDeriv[adr] += m->dof_frictionloss[i] / mjPASSIVE_FRICTION_V0 * (1 - t*t);
+    }
   }
 
   // flex edge damping
