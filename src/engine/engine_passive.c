@@ -651,7 +651,7 @@ static void mj_flexPassiveStretch(const mjModel* m, mjData* d, int f,
 }
 
 
-// Feather: slope d/dv of the smooth passive friction F * tanh(v / v0) of a dof with frictionloss F < 0
+// Feather: slope d/dv of the smooth passive friction F*tanh(v/v0) of a dof with frictionloss F < 0
 mjtNum mj_frictionSlope(mjtNum frictionloss, mjtNum v) {
   mjtNum t = mju_tanh(v / mjPASSIVE_FRICTION_V0);
   return frictionloss / mjPASSIVE_FRICTION_V0 * (1 - t*t);

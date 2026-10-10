@@ -2395,7 +2395,7 @@ void mjd_actuator_vel(const mjModel* m, mjData* d) {
       // extract bias info: prm = [const, kp, kv, vsat]
       const mjtNum* prm = m->actuator_biasprm + mjNBIAS*i;
 
-      // Feather speed-shaped brake: beyond vsat the velocity term is constant, so its derivative is 0
+      // Feather speed-shaped brake: beyond vsat the velocity term is constant, its derivative 0
       bias_vel = (prm[3] > 0 && mju_abs(d->actuator_velocity[oadr]) >= prm[3]) ? 0 : prm[2];
     }
 

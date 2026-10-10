@@ -827,8 +827,8 @@ void mj_fwdActuation(const mjModel* m, mjData* d) {
       break;
 
     case mjBIAS_AFFINE: {           // affine: biasprm = [const, kp, kv, vsat]
-      // Feather: vsat > 0 saturates the velocity term at |velocity| = vsat, a speed-shaped brake (kv*velocity inside
-      // the band, constant beyond it); vsat = 0 is upstream's affine bias, operation for operation
+      // Feather speed-shaped brake: vsat > 0 saturates the velocity term at |velocity| = vsat
+      // (kv*velocity inside the band, constant beyond it); vsat <= 0 is upstream's affine bias
       mjtNum velocity = d->actuator_velocity[oadr];
       if (biasprm[3] > 0) {
         velocity = mju_clip(velocity, -biasprm[3], biasprm[3]);
