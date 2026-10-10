@@ -22,6 +22,7 @@
 #include <gtest/gtest.h>
 #include <mujoco/mjmodel.h>
 #include <mujoco/mujoco.h>
+#include "src/engine/engine_passive.h"
 #include "test/fixture.h"
 
 namespace mujoco {
@@ -1267,6 +1268,112 @@ TEST_F(ElasticityTest, StretchParentBodyRotation) {
     }
     if (HasFatalFailure()) return;
   }
+}
+
+// Feather smooth passive friction: a negative dof frictionloss F adds F*tanh(v/v0) to qfrc_damper
+// beside the dof damping, on each dof of a multi-dof joint independently; a zero or positive
+// frictionloss (MuJoCo's constraint friction) adds nothing to the passive force
+TEST_F(PassiveTest, SmoothFrictionForce) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option gravity="0 0 0">
+      <flag contact="disable"/>
+    </option>
+    <worldbody>
+      <body>
+        <joint name="hinge" damping=".1" frictionloss="-.3"/>
+        <geom size=".1" mass="1"/>
+        <body pos=".3 0 0">
+          <joint name="slide" type="slide" frictionloss="-.2"/>
+          <geom size=".05" mass=".5"/>
+          <body pos=".2 0 0">
+            <joint name="ball" type="ball" frictionloss="-.25"/>
+            <geom size=".05" mass=".2"/>
+            <body pos=".2 0 0">
+              <joint name="constraint" damping=".1" frictionloss=".3"/>
+              <geom size=".05" mass=".2"/>
+            </body>
+          </body>
+        </body>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+  mjModel* m = model.get();
+  mjData* d = data.get();
+  ASSERT_EQ(m->nv, 6);
+
+  const mjtNum speeds[] = {0.0, 0.01, -0.03, 0.05, 0.2, -1.0, 3.0};
+  for (int k = 0; k < 7; k++) {
+    for (int i = 0; i < m->nv; i++) {
+      d->qvel[i] = speeds[(k + i) % 7];
+    }
+    mj_forward(m, d);
+    for (int i = 0; i < m->nv; i++) {
+      mjtNum v = d->qvel[i];
+      mjtNum F = m->dof_frictionloss[i];
+      mjtNum expected = -v * m->dof_damping[i];
+      if (F < 0) {
+        expected += F * mju_tanh(v / mjPASSIVE_FRICTION_V0);
+      }
+      EXPECT_MJTNUM_EQ(d->qfrc_damper[i], expected) << "dof " << i << ", qvel " << v;
+    }
+  }
+
+  // the hinge at v = v0: -0.1 * 0.05 - 0.3 * tanh(1)
+  mju_zero(d->qvel, m->nv);
+  d->qvel[0] = mjPASSIVE_FRICTION_V0;
+  mj_forward(m, d);
+  EXPECT_NEAR(d->qfrc_damper[0], -0.23347824678672947, MjTol(1e-15, 1e-6));
+  EXPECT_NEAR(d->qfrc_passive[0], -0.23347824678672947, MjTol(1e-15, 1e-6));
+}
+
+// Feather smooth passive friction is a damper of the friction loss: off with mjDSBL_FRICTIONLOSS
+// and with mjDSBL_DAMPER, unaffected by mjDSBL_SPRING
+TEST_F(PassiveTest, SmoothFrictionDisableFlags) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option gravity="0 0 0"/>
+    <worldbody>
+      <body>
+        <joint damping=".1" frictionloss="-.3"/>
+        <geom size=".1" mass="1"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+  mjModel* m = model.get();
+  mjData* d = data.get();
+
+  mjtNum v = 0.04;
+  mjtNum damper = -0.1 * v;
+  mjtNum friction = -0.3 * mju_tanh(v / mjPASSIVE_FRICTION_V0);
+  d->qvel[0] = v;
+
+  mj_forward(m, d);
+  EXPECT_MJTNUM_EQ(d->qfrc_passive[0], damper + friction);
+  EXPECT_EQ(d->nf, 0);
+
+  m->opt.disableflags = mjDSBL_SPRING;
+  mj_forward(m, d);
+  EXPECT_MJTNUM_EQ(d->qfrc_passive[0], damper + friction);
+
+  m->opt.disableflags = mjDSBL_FRICTIONLOSS;
+  mj_forward(m, d);
+  EXPECT_MJTNUM_EQ(d->qfrc_passive[0], damper);
+
+  m->opt.disableflags = mjDSBL_DAMPER;
+  mj_forward(m, d);
+  EXPECT_EQ(d->qfrc_passive[0], 0);
+  EXPECT_EQ(d->nf, 0);
 }
 
 }  // namespace

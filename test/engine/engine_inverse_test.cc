@@ -217,5 +217,69 @@ TEST_F(InverseTest, DiscreteInverseFreeBody) {
   EXPECT_LT(d->solver_fwdinv[1], epsilon);
 }
 
+// Feather smooth passive friction: discrete-time inverse dynamics recovers the applied force (none)
+// from a step's acceleration under every integrator, near rest where the friction is stiffest: the
+// slope that Euler (eulerdamp) integrates implicitly must also be undone by mj_discreteAcc
+TEST_F(InverseTest, DiscreteInverseSmoothFriction) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option timestep="0.002">
+      <flag invdiscrete="enable" contact="disable"/>
+    </option>
+    <worldbody>
+      <body>
+        <joint axis="0 1 0" frictionloss="-.3"/>
+        <geom type="capsule" fromto="0 0 0 0 0 -.3" size=".04" mass="1"/>
+        <body pos="0 0 -.3">
+          <joint axis="0 1 0" frictionloss="-.3"/>
+          <geom type="capsule" fromto="0 0 0 0 0 -.3" size=".03" mass=".5"/>
+        </body>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+  mjModel* m = model.get();
+  mjData* d = data.get();
+  int nv = m->nv;
+  int nstate = mj_stateSize(m, mjSTATE_INTEGRATION);
+  std::vector<mjtNum> state(nstate), qvel_next(nv), qacc_fd(nv);
+
+  for (mjtNum damping : {0.0, 0.05}) {
+    for (int i = 0; i < nv; i++) {
+      m->dof_damping[i] = damping;
+    }
+    for (mjtIntegrator integrator : {mjINT_EULER, mjINT_IMPLICIT, mjINT_IMPLICITFAST}) {
+      m->opt.integrator = integrator;
+
+      // near rest, hanging: speeds of the order of v0
+      mj_resetData(m, d);
+      d->qpos[0] = 0.02;
+      d->qpos[1] = -0.03;
+      for (int i = 0; i < 20; i++) {
+        mj_step(m, d);
+      }
+
+      // save state, step, finite-difference the acceleration, restore
+      mj_getState(m, d, state.data(), mjSTATE_INTEGRATION);
+      mj_step(m, d);
+      mju_copy(qvel_next.data(), d->qvel, nv);
+      mj_setState(m, d, state.data(), mjSTATE_INTEGRATION);
+      mju_sub(qacc_fd.data(), qvel_next.data(), d->qvel, nv);
+      mju_scl(qacc_fd.data(), qacc_fd.data(), 1 / m->opt.timestep, nv);
+
+      // inverse dynamics of that acceleration: nothing was applied
+      mj_forward(m, d);
+      mju_copy(d->qacc, qacc_fd.data(), nv);
+      mj_inverse(m, d);
+      EXPECT_LT(mju_norm(d->qfrc_inverse, nv), MjTol(1e-10, 1e-3))
+          << "integrator " << integrator << ", damping " << damping;
+    }
+  }
+}
+
 }  // namespace
 }  // namespace mujoco

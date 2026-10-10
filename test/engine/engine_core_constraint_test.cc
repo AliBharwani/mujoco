@@ -1647,5 +1647,64 @@ TEST_F(CoreConstraintTest, SparseRotationalJacobianMatchesDense) {
       << "Rotational Jacobian should have non-zero entries";
 }
 
+// Feather smooth passive friction: a negative dof frictionloss makes no friction constraint row (it
+// is a passive force), on hinge and ball dofs; a positive one makes one row per dof, as upstream;
+// tendon frictionloss is unchanged (a row only when positive)
+TEST_F(CoreConstraintTest, SmoothFrictionNoConstraintRow) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option gravity="0 0 0"/>
+    <worldbody>
+      <body>
+        <joint name="smooth" frictionloss="-.3"/>
+        <geom size=".1" mass="1"/>
+        <body pos=".3 0 0">
+          <joint name="constraint" frictionloss=".3"/>
+          <geom size=".05" mass=".5"/>
+          <body pos=".2 0 0">
+            <joint name="ball" type="ball" frictionloss="-.25"/>
+            <geom size=".05" mass=".2"/>
+          </body>
+        </body>
+      </body>
+    </worldbody>
+    <tendon>
+      <fixed frictionloss=".4">
+        <joint joint="smooth" coef="1"/>
+      </fixed>
+      <fixed frictionloss="-.4">
+        <joint joint="constraint" coef="1"/>
+      </fixed>
+    </tendon>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+  mjModel* m = model.get();
+  mjData* d = data.get();
+
+  for (mjtNum qvel : {0.0, 1.0}) {
+    for (int i = 0; i < m->nv; i++) {
+      d->qvel[i] = qvel;
+    }
+    mj_forward(m, d);
+    ASSERT_EQ(d->nf, 2);
+    ASSERT_EQ(d->nefc, 2);
+    EXPECT_EQ(d->efc_type[0], mjCNSTR_FRICTION_DOF);
+    EXPECT_EQ(d->efc_id[0], 1);
+    EXPECT_EQ(d->efc_frictionloss[0], 0.3);
+    EXPECT_EQ(d->efc_type[1], mjCNSTR_FRICTION_TENDON);
+    EXPECT_EQ(d->efc_id[1], 0);
+  }
+
+  // disabled: no rows at all
+  m->opt.disableflags = mjDSBL_FRICTIONLOSS;
+  mj_forward(m, d);
+  EXPECT_EQ(d->nf, 0);
+  EXPECT_EQ(d->nefc, 0);
+}
+
 }  // namespace
 }  // namespace mujoco
