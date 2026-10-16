@@ -97,6 +97,54 @@ int mjc_PlaneCapsule(const mjModel* m, mjData* d, mjPreContact* con, int g1, int
 }
 
 
+// FEATHER: the vectors mjc_PlaneCylinder builds against a plane with unit normal `normal`: the
+// axis turned toward the plane and scaled by the half-length, the radius vector toward the plane,
+// and the sideways vector to the near rim's other two points; returns the unit axis's projection
+// on the normal (non-positive). The smooth heightfield collider builds its points from these too.
+mjtNum mjc_cylinderRim(const mjtNum normal[3], const mjtNum mat[9], const mjtNum size[3],
+                       mjtNum axis[3], mjtNum vec[3], mjtNum vec1[3]) {
+  axis[0] = mat[2];
+  axis[1] = mat[5];
+  axis[2] = mat[8];
+
+  // project, make sure axis points towards plane
+  mjtNum prjaxis = mju_dot3(normal, axis);
+  if (prjaxis > 0) {
+    mju_scl3(axis, axis, -1);
+    prjaxis = -prjaxis;
+  }
+
+  // remove component of -normal along axis, compute length
+  mju_scl3(vec, axis, prjaxis);
+  mju_subFrom3(vec, normal);
+  mjtNum len_sqr = mju_dot3(vec, vec);
+
+  // general configuration: normalize vector, scale by radius
+  if (len_sqr >= mjMINVAL*mjMINVAL) {
+    mjtNum scl = size[0]/mju_sqrt(len_sqr);
+    vec[0] *= scl;
+    vec[1] *= scl;
+    vec[2] *= scl;
+  }
+
+  // disk parallel to plane: pick x-axis of cylinder, scale by radius
+  else {
+    vec[0] = mat[0]*size[0];
+    vec[1] = mat[3]*size[0];
+    vec[2] = mat[6]*size[0];
+  }
+
+  // scale axis by half-length
+  mju_scl3(axis, axis, size[1]);
+
+  // sideways vector
+  mji_cross(vec1, vec, axis);
+  mju_normalize3(vec1);
+  mju_scl3(vec1, vec1, size[0] * mju_sqrt(3.0) / 2);
+  return prjaxis;
+}
+
+
 // plane : cylinder
 int mjc_PlaneCylinder(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2,
                       mjtNum margin) {
@@ -107,44 +155,15 @@ int mjc_PlaneCylinder(const mjModel* m, mjData* d, mjPreContact* con, int g1, in
   const mjtNum* size2 = m->geom_size + 3*g2;
 
   mjtNum normal[3] = {mat1[2], mat1[5], mat1[8]};
-  mjtNum axis[3] = {mat2[2], mat2[5], mat2[8]};
-
-  // project, make sure axis points towards plane
-  mjtNum prjaxis = mju_dot3(normal, axis);
-  if (prjaxis > 0) {
-    mju_scl3(axis, axis, -1);
-    prjaxis = -prjaxis;
-  }
+  mjtNum axis[3], vec[3], vec1[3];
+  mjtNum prjaxis = mjc_cylinderRim(normal, mat2, size2, axis, vec, vec1);
 
   // compute normal distance to cylinder center
-  mjtNum vec[3] = {pos2[0] - pos1[0], pos2[1] - pos1[1], pos2[2] - pos1[2]};
-  mjtNum dist0 = mju_dot3(vec, normal);
-
-  // remove component of -normal along axis, compute length
-  mju_scl3(vec, axis, prjaxis);
-  mju_subFrom3(vec, normal);
-  mjtNum len_sqr = mju_dot3(vec, vec);
-
-  // general configuration: normalize vector, scale by radius
-  if (len_sqr >= mjMINVAL*mjMINVAL) {
-    mjtNum scl = size2[0]/mju_sqrt(len_sqr);
-    vec[0] *= scl;
-    vec[1] *= scl;
-    vec[2] *= scl;
-  }
-
-  // disk parallel to plane: pick x-axis of cylinder, scale by radius
-  else {
-    vec[0] = mat2[0]*size2[0];
-    vec[1] = mat2[3]*size2[0];
-    vec[2] = mat2[6]*size2[0];
-  }
+  mjtNum dif[3] = {pos2[0] - pos1[0], pos2[1] - pos1[1], pos2[2] - pos1[2]};
+  mjtNum dist0 = mju_dot3(dif, normal);
 
   // project vector on normal
   mjtNum prjvec = mju_dot3(vec, normal);
-
-  // scale axis by half-length
-  mju_scl3(axis, axis, size2[1]);
   prjaxis *= size2[1];
 
   // check first point, construct contact
@@ -175,12 +194,6 @@ int mjc_PlaneCylinder(const mjModel* m, mjData* d, mjPreContact* con, int g1, in
   // try to add triangle points on side closer to plane
   mjtNum prjvec1 = -prjvec*0.5;
   if (dist0 + prjaxis + prjvec1 <= margin) {
-    // compute sideways vector: vec1
-    mjtNum vec1[3];
-    mji_cross(vec1, vec, axis);
-    mju_normalize3(vec1);
-    mju_scl3(vec1, vec1, size2[0] * mju_sqrt(3.0) / 2);
-
     // add point A
     con[cnt].dist = dist0 + prjaxis + prjvec1;
     mji_add3(con[cnt].pos, pos2, vec1);

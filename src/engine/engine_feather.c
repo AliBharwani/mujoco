@@ -64,7 +64,7 @@ int mjf_layout(const char* type, const char* field) {
   SIZE(mjtNum); SIZE(mjModel); SIZE(mjData); SIZE(mjOption); SIZE(mjContact);
   OFFSET(mjModel, opt); OFFSET(mjModel, nq); OFFSET(mjModel, body_mass);
   OFFSET(mjModel, geom_type); OFFSET(mjModel, geom_size); OFFSET(mjModel, hfield_data);
-  OFFSET(mjModel, hfield_mipmin); OFFSET(mjModel, hfield_mipmax); OFFSET(mjModel, hfield_mipvalid);
+  OFFSET(mjModel, hfield_collider);
   OFFSET(mjData, qpos); OFFSET(mjData, qvel); OFFSET(mjData, contact);
   OFFSET(mjData, xpos); OFFSET(mjData, xfrc_applied); OFFSET(mjData, tree_asleep);
   OFFSET(mjContact, dist); OFFSET(mjContact, pos); OFFSET(mjContact, frame);
@@ -93,22 +93,26 @@ int mjf_writeHfieldData(mjModel* m, mjData* d, int id, const float* values, int 
   return mjf_writeHfieldRows(m, d, id, 0, m->hfield_nrow[id], values, count);
 }
 
-int mjf_enableHfieldMip(mjModel* m, int id, int enable) {
+int mjf_setHfieldCollider(mjModel* m, int id, int collider) {
+  if (!m || id < 0 || id >= m->nhfield || collider < 0 || collider > 1) return -1;
+  int previous = m->hfield_collider[id];
+  m->hfield_collider[id] = collider;
+  return previous;
+}
+
+int mjf_hfieldCollider(const mjModel* m, int id) {
   if (!m || id < 0 || id >= m->nhfield) return -1;
-  if (!enable) {
-    m->hfield_mipvalid[id] = 0;
-    return 0;
+  return m->hfield_collider[id];
+}
+
+// Whether geom g can collide with heightfield geom hg: the bitmask, or an explicit pair.
+static int canTouch(const mjModel* m, int g, int hg) {
+  if ((m->geom_contype[g] & m->geom_conaffinity[hg]) ||
+      (m->geom_contype[hg] & m->geom_conaffinity[g])) return 1;
+  for (int p = 0; p < m->npair; p++) {
+    if ((m->pair_geom1[p] == g && m->pair_geom2[p] == hg) ||
+        (m->pair_geom1[p] == hg && m->pair_geom2[p] == g)) return 1;
   }
-  const float* heights = m->hfield_data + m->hfield_adr[id];
-  mjtSize n = (mjtSize)m->hfield_nrow[id]*m->hfield_ncol[id];
-  for (mjtSize i = 0; i < n; i++) {
-    if (!isfinite(heights[i])) {
-      m->hfield_mipvalid[id] = 0;
-      return -1;
-    }
-  }
-  mjc_updateHFieldMip(m, id, 0, m->hfield_nrow[id]-1, 0, m->hfield_ncol[id]-1);
-  m->hfield_mipvalid[id] = 1;
   return 0;
 }
 
@@ -129,32 +133,20 @@ static int wakeHfieldRegion(const mjModel* m, mjData* d, int id,
   int woke = 0;
   for (int hg = 0; hg < m->ngeom; hg++) {
     if (m->geom_type[hg] != mjGEOM_HFIELD || m->geom_dataid[hg] != id) continue;
-    const mjtNum* hpos = d->geom_xpos+3*hg;
-    const mjtNum* hmat = d->geom_xmat+9*hg;
     for (int g = 0; g < m->ngeom; g++) {
       int tree = m->body_treeid[m->geom_bodyid[g]];
-      if (tree < 0 || d->tree_asleep[tree] < 0) continue;
+      if (tree < 0 || d->tree_asleep[tree] < 0 || !canTouch(m, g, hg)) continue;
       int r0 = rmin, r1 = rmax, c0 = cmin, c1 = cmax;
       if (m->geom_type[g] != mjGEOM_PLANE) {
-        const mjtNum* aabb = m->geom_aabb+6*g;
-        const mjtNum* mat = d->geom_xmat+9*g;
-        mjtNum center[3], dif[3], local[3], rotation[9];
-        mju_mulMatVec3(center, mat, aabb);
-        mju_addTo3(center, d->geom_xpos+3*g);
-        mju_sub3(dif, center, hpos);
-        mju_mulMatTVec3(local, hmat, dif);
-        mju_mulMatTMat3(rotation, hmat, mat);
+        // the collider's footprint box, in the hfield's own frame (translated, rotated or
+        // instanced fields alike), grown by the margin
+        mjtNum lo[3], hi[3];
+        mjc_hfieldGeomBox(m, d, hg, g, lo, hi);
         mjtNum margin = mju_max(0, mj_assignMargin(m, mju_max(pair_margin,
                                           m->geom_margin[g] + m->geom_margin[hg])));
-        mjtNum ex = margin, ey = margin;
-        for (int j = 0; j < 3; j++) {
-          ex += mju_abs(rotation[j])*aabb[3+j];
-          ey += mju_abs(rotation[3+j])*aabb[3+j];
-        }
-        // Each edited vertex affects the cells on both sides. Work in the
-        // hfield's own frame, including translated/rotated/instanced fields.
-        mjtNum x0 = (local[0]-ex+size[0])/dx, x1 = (local[0]+ex+size[0])/dx;
-        mjtNum y0 = (local[1]-ey+size[1])/dy, y1 = (local[1]+ey+size[1])/dy;
+        // Each edited vertex affects the cells on both sides.
+        mjtNum x0 = (lo[0]-margin+size[0])/dx, x1 = (hi[0]+margin+size[0])/dx;
+        mjtNum y0 = (lo[1]-margin+size[1])/dy, y1 = (hi[1]+margin+size[1])/dy;
         if (x1+1 < cmin || x0-1 > cmax || y1+1 < rmin || y0-1 > rmax) continue;
         c0 = mjMAX(cmin, (int)ceil(mju_max(-1, x0-1e-9))-1);
         c1 = mjMIN(cmax, (int)mju_floor(mju_min(nc, x1+1e-9))+1);
@@ -220,7 +212,6 @@ int mjf_writeHfieldRows(mjModel* m, mjData* d, int id, int row_start,
     }
   }
   if (rmax >= 0) {
-    if (m->hfield_mipvalid[id]) mjc_updateHFieldMip(m, id, rmin, rmax, cmin, cmax);
     wakeHfieldRegion(m, d, id, rmin, rmax, cmin, cmax, dirty, row_start);
   }
   if (dirty) mj_freeStack(d);

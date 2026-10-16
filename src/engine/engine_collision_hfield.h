@@ -17,22 +17,16 @@
 extern "C" {
 #endif
 
-// Refresh the min/max pyramid for an inclusive rectangle of edited samples.
-// Leaves cover 2x2 cells (3x3 samples). Levels are packed at hfield_adr;
-// their total size is at most nrow*ncol, including rectangular/odd grids.
-void mjc_updateHFieldMip(mjModel* m, int id, int rmin, int rmax, int cmin, int cmax);
-
-// Top-surface contacts for a box/convex hull inside a heightfield's footprint.
-// Returns -1 when the regular solid-prism collider must handle the pair instead.
-int mjc_PolyHField(const mjModel* m, mjData* d, mjPreContact* con,
-                  int hgeom, int pgeom, mjtNum margin);
-
-// Smooth-normal, feature-anchored contacts for any convex primitive or polygon mesh
-// over the heightfield's interior (at most four per pair). Returns -1 when another
-// collider must handle the pair: unsupported types, meshes without polygons, or geoms
-// reaching the field's side walls or underside.
+// The collision table's heightfield x convex entry: smooth-normal, feature-anchored contacts
+// (at most four per pair) for convex primitives and polygon meshes over the field's interior;
+// upstream mjc_ConvexHField for the side walls, the underside, other geoms, and fields whose
+// hfield_collider selects upstream.
 int mjc_SmoothHField(const mjModel* m, mjData* d, mjPreContact* con,
                      int hgeom, int g, mjtNum margin);
+
+// A geom's bounding box in a heightfield geom's frame (the smooth collider's footprint).
+void mjc_hfieldGeomBox(const mjModel* m, const mjData* d, int hgeom, int g,
+                       mjtNum lo[3], mjtNum hi[3]);
 
 #ifdef __cplusplus
 }

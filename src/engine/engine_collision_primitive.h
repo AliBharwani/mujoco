@@ -50,6 +50,12 @@ MJAPI int mjc_PlaneCapsule(const mjModel* m, mjData* d, mjPreContact* con, int g
                            mjtNum margin);
 MJAPI int mjc_PlaneCylinder(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2,
                             mjtNum margin);
+// FEATHER: mjc_PlaneCylinder's construction against a plane with unit normal `normal`: the axis
+// toward the plane scaled by the half-length, the radius vector toward it, and the sideways
+// vector to the near rim's other two points. Returns the unit axis's projection on the normal.
+mjtNum mjc_cylinderRim(const mjtNum normal[3], const mjtNum mat[9], const mjtNum size[3],
+                       mjtNum axis[3], mjtNum vec[3], mjtNum vec1[3]);
+
 MJAPI int mjc_PlaneBox(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2,
                        mjtNum margin);
 

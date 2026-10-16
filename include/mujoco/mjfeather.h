@@ -34,20 +34,20 @@ MJAPI int mjf_layout(const char* type, const char* field);
 // timer call counts still advance. Reading/clearing mjData.timer is caller-owned.
 MJAPI void mjf_enableTimers(int enable);
 
-// Process-global convex-heightfield collider: 0 (default) smooth normals and at most
-// four feature-anchored contacts per pair; 1 face clipping of the hull's lower faces;
-// 2 upstream solid prisms. Each falls back to the next for pairs it does not handle. Call only
-// while all simulations/workers are idle. Returns the previous collider, or -1 (no
-// change) for an unknown one.
-MJAPI int mjf_setHfieldCollider(int collider);
-MJAPI int mjf_hfieldCollider(void);
+// Convex collider of heightfield `id`, stored in the model (hfield_collider): 0 (the compiled
+// default) smooth normals and at most four feature-anchored contacts per pair over the interior,
+// with upstream's solid prisms for the side walls and underside; 1 upstream's prisms throughout.
+// Call while no collision runs on this model. Returns the previous collider, or -1 (no change)
+// for invalid input; the getter returns -1 for an invalid id.
+MJAPI int mjf_setHfieldCollider(mjModel* m, int id, int collider);
+MJAPI int mjf_hfieldCollider(const mjModel* m, int id);
 
 // Wake all sleeping islands without changing positions, velocities or applied forces.
 MJAPI int mjf_wakeAll(const mjModel* m, mjData* d);
 
-// Validate the whole input, clamp to [0,1], write only changes and wake this data's
-// overlapping sleeping islands. Shared-model callers must also wake their other
-// datas via mjf_wakeHfieldRegion (or mjf_wakeAll for a conservative fallback).
+// Validate the whole input, clamp to [0,1], write only changes and wake this data's sleeping
+// islands with a geom that can touch the field over the change. Shared-model callers must also
+// wake their other datas via mjf_wakeHfieldRegion (or mjf_wakeAll for a conservative fallback).
 // Returns -1 for invalid input (no writes), 0 for identical data, 1 for a change.
 MJAPI int mjf_writeHfieldData(mjModel* m, mjData* d, int id,
                              const float* values, int count);
@@ -58,14 +58,6 @@ MJAPI int mjf_writeHfieldData(mjModel* m, mjData* d, int id,
 // must be idle during writes. Shared-model callers must wake their other datas.
 MJAPI int mjf_writeHfieldRows(mjModel* m, mjData* d, int id, int row_start,
                              int row_count, const float* values, int count);
-
-// Opt in to cached hfield search for collider 1 (initially disabled for raw-write
-// compatibility; the default collider does not read it).
-// Nonzero fully refreshes then enables this field; zero disables it. Subsequent
-// writes must use the write APIs above, or call this again to refresh after raw
-// writes BEFORE collision. Call while all readers of this model are idle.
-// Returns -1 for invalid input (including non-finite raw heights), 0 otherwise.
-MJAPI int mjf_enableHfieldMip(mjModel* m, int id, int enable);
 
 // Wake sleeping islands over an edited rectangle of SAMPLES (not cells), with
 // adjacent-cell and contact-margin expansion, for every geom using this hfield.
