@@ -30,6 +30,12 @@ mujoco_test(engine_collision_convex_test)
 
 mujoco_test(engine_collision_driver_test)
 
+mujoco_test(engine_collision_broadphase_test)
+
+mujoco_test(engine_collision_hfield_test)
+
+mujoco_test(engine_collision_manifold_test)
+
 mujoco_test(engine_collision_reuse_test)
 
 mujoco_test(engine_collision_gjk_test ADDITIONAL_LINK_LIBRARIES ccd)

@@ -596,7 +596,6 @@
     X   ( int,     hfield_ncol,           nhfield,       1                    ) \
     X   ( int,     hfield_adr,            nhfield,       1                    ) \
     XNV ( float,   hfield_data,           nhfielddata,   1                    ) \
-    X   ( mjtByte, hfield_collider,       nhfield,       1                    ) \
     X   ( int,     hfield_pathadr,        nhfield,       1                    )
 
 #define MJMODEL_POINTERS_TEXTURE                                                \

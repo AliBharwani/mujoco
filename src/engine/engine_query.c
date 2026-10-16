@@ -1,20 +1,22 @@
 // engine_query.c — Feather fork: native spatial-query layer (see mjfeather.h).
 //
-// Reuses MuJoCo's own ray intersection (mj_rayMask) and geom state (geom_xpos,
-// geom_rbound) so query results are consistent with the simulation. Kept in a
-// separate file for clean rebases onto upstream MuJoCo.
+// Reuses MuJoCo's own ray intersection (mj_rayMask) and geom state (geom_xpos, geom_xmat,
+// geom_rbound) so query results are consistent with the simulation. Both queries test every geom;
+// only a mesh's ray uses a tree (the mesh's own). Kept in a separate file for clean rebases onto
+// upstream MuJoCo.
 
 #include <math.h>
 #include <mujoco/mjfeather.h>
 #include "engine/engine_ray.h"
-#include <mujoco/mujoco.h>   // mj_ray, mju_dist3, mju_normalize3
+#include <mujoco/mujoco.h>   // mju_normalize3, mju_zero3, mju_copy3
 
-// Both raycasts: a NULL mask keeps every geom. Invalid input and a zero-length ray miss.
-static int raycast(const mjModel* m, const mjData* d, const mjtNum origin[3], const mjtNum dir[3],
-                   int bodyexclude, mjtBool include_static, const int* mask, mjfRayHit* out) {
+// Invalid input and a zero-length ray miss.
+int mjf_raycast(const mjModel* m, const mjData* d, const mjtNum origin[3], const mjtNum dir[3],
+                int bodyexclude, mjtBool include_static, int mask, mjfRayHit* out) {
   if (out) {
     out->dist = -1;
     mju_zero3(out->point);
+    mju_zero3(out->normal);
     out->geom = out->body = -1;
   }
   if (!m || !d || !origin || !dir) return 0;
@@ -22,52 +24,21 @@ static int raycast(const mjModel* m, const mjData* d, const mjtNum origin[3], co
   mjtNum v[3] = {dir[0], dir[1], dir[2]};
   if (mju_normalize3(v) <= mjMINVAL) return 0;
   int geom = -1;
-  mjtNum dist = mj_rayMask(m, d, origin, v, NULL, include_static, bodyexclude, &geom, NULL, mask);
+  mjtNum normal[3];
+  mjtNum dist = mj_rayMask(m, d, origin, v, NULL, include_static, bodyexclude, &geom, normal, &mask);
   if (geom < 0 || dist < 0) return 0;
   if (out) {
     out->dist = dist;
+    mju_addScl3(out->point, origin, v, dist);
+    mju_copy3(out->normal, normal);
     out->geom = geom;
     out->body = m->geom_bodyid[geom];
-    mju_addScl3(out->point, origin, v, dist);
   }
   return 1;
 }
 
-int mjf_raycast(const mjModel* m, const mjData* d,
-                const mjtNum origin[3], const mjtNum dir[3],
-                int bodyexclude, mjtBool include_static, mjfRayHit* out) {
-  return raycast(m, d, origin, dir, bodyexclude, include_static, NULL, out);
-}
-
-int mjf_overlapSphere(const mjModel* m, const mjData* d,
-                      const mjtNum center[3], mjtNum radius,
-                      int bodyexclude, int* geoms, int maxgeoms) {
-  int found = 0;
-  for (int g = 0; g < m->ngeom; g++) {
-    if (bodyexclude >= 0 && m->geom_bodyid[g] == bodyexclude) {
-      continue;
-    }
-    // bounding-sphere overlap test: |center - geom_xpos| <= radius + rbound
-    mjtNum dd = mju_dist3(center, d->geom_xpos + 3*g);
-    if (dd <= radius + m->geom_rbound[g]) {
-      if (geoms && found < maxgeoms) {
-        geoms[found] = g;
-      }
-      found++;
-    }
-  }
-  return found;
-}
-
-int mjf_raycastFiltered(const mjModel* m, const mjData* d,
-                        const mjtNum origin[3], const mjtNum dir[3],
-                        int bodyexclude, mjtBool include_static, int mask, mjfRayHit* out) {
-  return raycast(m, d, origin, dir, bodyexclude, include_static, &mask, out);
-}
-
-int mjf_overlapSphereFiltered(const mjModel* m, const mjData* d,
-                              const mjtNum center[3], mjtNum radius,
-                              int bodyexclude, int mask, int* geoms, int maxgeoms) {
+int mjf_overlapSphere(const mjModel* m, const mjData* d, const mjtNum center[3], mjtNum radius,
+                      int bodyexclude, int mask, int* geoms, int maxgeoms) {
   if (!m || !d || !center || !isfinite(radius) || radius < 0 || maxgeoms < 0) return 0;
   for (int j = 0; j < 3; j++) if (!isfinite(center[j])) return 0;
   int found = 0;

@@ -18,9 +18,8 @@ extern "C" {
 #endif
 
 // The collision table's heightfield x convex entry: smooth-normal, feature-anchored contacts
-// (at most four per pair) for convex primitives and polygon meshes over the field's interior;
-// upstream mjc_ConvexHField for the side walls, the underside, other geoms, and fields whose
-// hfield_collider selects upstream.
+// (at most four per pair) for spheres, capsules, boxes and polygon meshes over the field's
+// interior; upstream mjc_ConvexHField for the side walls, the underside and other geoms.
 int mjc_SmoothHField(const mjModel* m, mjData* d, mjPreContact* con,
                      int hgeom, int g, mjtNum margin);
 

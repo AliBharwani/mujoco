@@ -3914,9 +3914,6 @@ void mjCModel::CopyObjects(mjModel* m) {
     memcpy(m->hfield_data + data_adr, phf->data.data(),
            static_cast<mjtSize>(phf->nrow) * phf->ncol * sizeof(float));
 
-    // convex geoms collide with the smooth collider
-    m->hfield_collider[i] = 0;
-
     // advance counter
     data_adr += phf->nrow*phf->ncol;
   }

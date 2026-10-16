@@ -3837,14 +3837,6 @@ STRUCTS: Mapping[str, StructDecl] = dict([
                  array_extent=('nhfielddata',),
              ),
              StructFieldDecl(
-                 name='hfield_collider',
-                 type=PointerType(
-                     inner_type=ValueType(name='mjtByte'),
-                 ),
-                 doc='convex collider: 0 smooth, 1 upstream',
-                 array_extent=('nhfield',),
-             ),
-             StructFieldDecl(
                  name='hfield_pathadr',
                  type=PointerType(
                      inner_type=ValueType(name='int'),
@@ -7133,6 +7125,13 @@ STRUCTS: Mapping[str, StructDecl] = dict([
                  name='signature',
                  type=ValueType(name='uint64_t'),
                  doc='also held by the mjSpec that compiled the model',
+             ),
+             StructFieldDecl(
+                 name='contactcache',
+                 type=PointerType(
+                     inner_type=ValueType(name='void'),
+                 ),
+                 doc='opaque, owned by this mjData',
              ),
          ),
      )),

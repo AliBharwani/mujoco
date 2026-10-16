@@ -11,15 +11,14 @@
 // whose internal side faces give lateral normals even on a flat field. Over the grid interior this
 // collider gives a smooth terrain normal and at most four contacts per pair, anchored at hull
 // vertices, terrain samples and lattice crossings. mjc_SmoothHField is the collision table's entry:
-// it leaves the side walls, the underside, unsupported geoms and fields set to upstream
-// (hfield_collider, mjf_setHfieldCollider) to mjc_ConvexHField's prisms.
+// it leaves the side walls, the underside and the geoms it does not handle (a cylinder, an
+// ellipsoid: no shipped model has one) to mjc_ConvexHField's prisms.
 
 #include "engine/engine_collision_hfield.h"
 
 #include <string.h>
 #include <mujoco/mjmacro.h>
 #include "engine/engine_collision_convex.h"
-#include "engine/engine_collision_primitive.h"
 #include "engine/engine_memory.h"
 #include "engine/engine_ray.h"
 #include "engine/engine_inline.h"
@@ -46,7 +45,7 @@
 // alone, so the choice cannot flip while the geom rocks; on a plane the contacts are
 // mjc_PlaneBox's vertices.
 //
-// Spheres, capsules, ellipsoids, cylinders: the plane functions' points, each against the
+// Spheres and capsules: the plane functions' points, each against the
 // terrain below it on the smooth normals, plus the deepest terrain feature (a triangle's
 // support point, a lattice sample, a sharp ridge edge) when it is deeper by more than a
 // tenth of the margin. A capsule's side also rests on ridge lines and peak samples; like a
@@ -704,7 +703,7 @@ static int smoothPolytope(const mjModel* m, mjData* d, mjPreContact* con, int hg
 }
 
 
-//------------------------------ spheres, capsules, ellipsoids and cylinders
+//------------------------------ spheres and capsules
 
 // A curved geom is upstream's CCD object with its pose in the heightfield frame, so its support
 // point is upstream's support function.
@@ -904,16 +903,9 @@ static int smoothCurved(const mjModel* m, mjData* d, mjPreContact* con, int hgeo
   mjtNum scale = m->geom_rbound[g] > 0 ? m->geom_rbound[g] : 1;
   mjtNum slack = 0.1*margin + 1e-6*scale;  // a feature must beat the plane points by this
 
-  mjtNum flattest = scale;
-  if (shape.geom_type == mjGEOM_ELLIPSOID) {
-    mjtNum longest = hmax(shape.size[0], hmax(shape.size[1], shape.size[2]));
-    mjtNum shortest = hmin(shape.size[0], hmin(shape.size[1], shape.size[2]));
-    flattest = hmax(scale, longest*longest/hmax(shortest, mjMINVAL));
-  }
-
   // the plane functions' points, each measured against the terrain below it
   mjtNum axis[3] = {shape.mat[2], shape.mat[5], shape.mat[8]};
-  mjtNum points[4][3], normal[3];
+  mjtNum points[2][3], normal[3];
   int nplane = 0;
   if (shape.geom_type == mjGEOM_CAPSULE) {
     // mjc_PlaneCapsule: the two end spheres (a capsule of zero length is its end sphere)
@@ -923,23 +915,8 @@ static int smoothCurved(const mjModel* m, mjData* d, mjPreContact* con, int hgeo
       mji_addScl3(ball.pos, shape.pos, axis, e ? -shape.size[1] : shape.size[1]);
       supportOnTerrain(grid, &ball, points[nplane++], normal);
     }
-  } else if (shape.geom_type == mjGEOM_CYLINDER) {
-    // mjc_PlaneCylinder's four points, under the terrain normal at its deepest one
-    mjtNum ax[3], vec[3], vec1[3];
-    supportOnTerrain(grid, &shape, points[0], normal);
-    mjc_cylinderRim(normal, shape.mat, shape.size, ax, vec, vec1);
-    mji_add3(points[0], shape.pos, vec);
-    mji_addTo3(points[0], ax);
-    mji_add3(points[1], shape.pos, vec);
-    mji_subFrom3(points[1], ax);
-    for (int k = 0; k < 2; k++) {
-      mji_addScl3(points[2 + k], shape.pos, vec1, k ? -1 : 1);
-      mji_addTo3(points[2 + k], ax);
-      mji_addToScl3(points[2 + k], vec, -0.5);
-    }
-    nplane = 4;
   } else {
-    // mjc_PlaneSphere, and mjc_PlaneConvex for ellipsoids: the support point
+    // mjc_PlaneSphere: the support point
     supportOnTerrain(grid, &shape, points[nplane++], normal);
   }
 
@@ -991,8 +968,7 @@ static int smoothCurved(const mjModel* m, mjData* d, mjPreContact* con, int hgeo
   // (3) ridge edges sharp enough to beat the slack: a geom whose surface curves no flatter
   // than radius R, across a kink whose triangle normals differ by 1 - cos(a), sits at most
   // about R*(1 - cos(a))/4 deeper on the edge than on either triangle. R is the bounding
-  // radius, or an ellipsoid's flattest curvature (longest semi-axis squared over the
-  // shortest), which exceeds it. Edges from each sample: along the row
+  // radius. Edges from each sample: along the row
   // (between the lower triangle of cell (r, c) and the upper one of cell (r-1, c)),
   // along the column (upper of (r, c), lower of (r, c-1)), and the cell's diagonal.
   for (int r = rmin; r <= rmax + 1; r++) {
@@ -1014,7 +990,7 @@ static int smoothCurved(const mjModel* m, mjData* d, mjPreContact* con, int hgeo
         mjtNum na[3], nb[3];
         triangleNormal(grid, ra, ca, ua, na);
         triangleNormal(grid, rb, cb, ub, nb);
-        if (flattest*(1 - hdot3(na, nb))/4 < slack) continue;
+        if (scale*(1 - hdot3(na, nb))/4 < slack) continue;
         // a ridge: b's far corner lies below a's plane
         mjtNum xe = c*grid->dx - grid->sx, ye = r*grid->dy - grid->sy, ze = sampleZ(grid, r, c);
         mjtNum xo = co*grid->dx - grid->sx, yo = ro*grid->dy - grid->sy;
@@ -1094,8 +1070,6 @@ static int smoothHField(const mjModel* m, mjData* d, mjPreContact* con, int hgeo
     return smoothPolytope(m, d, con, hgeom, g, margin, &grid);
   case mjGEOM_SPHERE:
   case mjGEOM_CAPSULE:
-  case mjGEOM_ELLIPSOID:
-  case mjGEOM_CYLINDER:
     return smoothCurved(m, d, con, hgeom, g, margin, &grid);
   default:
     return -1;
@@ -1117,14 +1091,9 @@ static int beyondField(const mjModel* m, const mjData* d, int hgeom, int g, mjtN
 
 int mjc_SmoothHField(const mjModel* m, mjData* d, mjPreContact* con, int hgeom, int g,
                      mjtNum margin) {
-  if (m->hfield_collider[m->geom_dataid[hgeom]] == 0) {
-    if (beyondField(m, d, hgeom, g, margin)) {
-      return 0;
-    }
-    int ncon = smoothHField(m, d, con, hgeom, g, margin);
-    if (ncon >= 0) {
-      return ncon;
-    }
+  if (beyondField(m, d, hgeom, g, margin)) {
+    return 0;
   }
-  return mjc_ConvexHField(m, d, con, hgeom, g, margin);
+  int ncon = smoothHField(m, d, con, hgeom, g, margin);
+  return ncon >= 0 ? ncon : mjc_ConvexHField(m, d, con, hgeom, g, margin);
 }
