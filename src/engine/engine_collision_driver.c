@@ -389,7 +389,7 @@ static inline void defaultPair(mjcPair* pair, int type) {
 
 // binary search between two bodyflex trees
 static void mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
-                           int merged, int startadr, int pairadr);
+                           int merged, int startadr, int pairadr, const int* nodemask);
 
 // compute contacts for a batch of collision pairs contained in a buffer of
 // stride 3 ints (g1, g2, ipair)
@@ -591,6 +591,59 @@ static int filterCollisionPair(const mjModel* m, mjData* d, int g1, int g2, int 
 }
 
 
+// FEATHER: per body-BVH node, the OR of geom_contype and the OR of geom_conaffinity over the geoms
+// below it, stored as {contype, conaffinity} at the node's bvh index; allocated on the stack, NULL
+// when no body has a tree. The midphase skips a node pair when no geom below one node can collide
+// with a geom below the other, so it never tests boxes whose every leaf pair the bitmask rejects.
+static int* bodyNodeMasks(const mjModel* m, mjData* d) {
+  int nbody = m->nbody, nnode = 0;
+  for (int b=0; b < nbody; b++) {
+    if (m->body_bvhadr[b] >= 0) {
+      nnode = mjMAX(nnode, m->body_bvhadr[b] + m->body_bvhnum[b]);
+    }
+  }
+  if (!nnode) {
+    return NULL;
+  }
+
+  int* mask = mjSTACKALLOC(d, 2*nnode, int);
+  for (int b=0; b < nbody; b++) {
+    int adr = m->body_bvhadr[b];
+    if (adr < 0) {
+      continue;
+    }
+
+    // the compiler numbers every child after its parent, so a reverse walk fills children first;
+    // a node that breaks that order gets every bit, which never prunes
+    for (int node=m->body_bvhnum[b]-1; node >= 0; node--) {
+      int i = adr + node;
+      const int* child = m->bvh_child + 2*i;
+      if (child[0] < 0 && child[1] < 0) {
+        int g = m->bvh_nodeid[i];
+        mask[2*i+0] = g >= 0 ? m->geom_contype[g] : 0;
+        mask[2*i+1] = g >= 0 ? m->geom_conaffinity[g] : 0;
+        continue;
+      }
+      int contype = 0, conaffinity = 0;
+      for (int k=0; k < 2; k++) {
+        if (child[k] < 0) {
+          continue;
+        }
+        if (child[k] <= node) {
+          contype = conaffinity = ~0;
+          break;
+        }
+        contype |= mask[2*(adr + child[k]) + 0];
+        conaffinity |= mask[2*(adr + child[k]) + 1];
+      }
+      mask[2*i+0] = contype;
+      mask[2*i+1] = conaffinity;
+    }
+  }
+  return mask;
+}
+
+
 // main collision function
 void mj_collision(const mjModel* m, mjData* d) {
   TM_START1;
@@ -624,6 +677,13 @@ void mj_collision(const mjModel* m, mjData* d) {
   int nbfpair = mj_broadphase(m, d, broadphasepair, nmaxpairs);
   unsigned int last_signature = -1;
   TM_END(mjTIMER_COL_BROAD);
+
+  // FEATHER: the midphase's node masks; not under a contact filter, which replaces the bitmask,
+  // nor while the visualizer marks active bounding volumes, which a pruned pair would leave unmarked
+  const int* nodemask = NULL;
+  if (!mjcb_contactfilter && !m->vis.global.bvactive && !mjDISABLED(mjDSBL_MIDPHASE)) {
+    nodemask = bodyNodeMasks(m, d);
+  }
 
   // narrowphase and midphase collision detector
   TM_RESTART;
@@ -705,7 +765,7 @@ void mj_collision(const mjModel* m, mjData* d) {
       }
 
       int ncon_before = d->ncon;
-      mj_collideTree(m, d, bf1, bf2, merged, startadr, pairadr);
+      mj_collideTree(m, d, bf1, bf2, merged, startadr, pairadr, nodemask);
       int ncon_after = d->ncon;
 
       // filter flex contacts (limit per geom-flex or flex-flex pair)
@@ -855,7 +915,7 @@ void mj_collision(const mjModel* m, mjData* d) {
           // select midphase mode
           if (m->flex_selfcollide[f] == mjFLEXSELF_BVH ||
               (m->flex_selfcollide[f] == mjFLEXSELF_AUTO && m->flex_dim[f] == 3)) {
-            mj_collideTree(m, d, nbody+f, nbody+f, 0, 0, 0);
+            mj_collideTree(m, d, nbody+f, nbody+f, 0, 0, 0, NULL);
           } else {
             mj_collideFlexSAP(m, d, f);
           }
@@ -994,7 +1054,7 @@ int mj_collideOBB(const mjtNum aabb1[6], const mjtNum aabb2[6],
 
 // binary search between two bodyflex trees
 static void mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
-                           int merged, int startadr, int pairadr) {
+                           int merged, int startadr, int pairadr, const int* nodemask) {
   int nbody = m->nbody, nbvhstatic = m->nbvhstatic;
   mjtBool isbody1 = (bf1 < nbody);
   mjtBool isbody2 = (bf2 < nbody);
@@ -1072,6 +1132,12 @@ static void mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
     if (isbody1 && isbody2) {
       // both are leaves
       if (isleaf1 && isleaf2) {
+        // FEATHER: the bitmask first; a pair it rejects never reaches the narrowphase
+        if (nodemask && filterBitmask(m->geom_contype[nodeid1], m->geom_conaffinity[nodeid1],
+                                      m->geom_contype[nodeid2], m->geom_conaffinity[nodeid2])) {
+          continue;
+        }
+
         mjtNum margin = mj_assignMargin(m, m->geom_margin[nodeid1] + m->geom_margin[nodeid2]);
         mjtNum gap = m->geom_gap[nodeid1] + m->geom_gap[nodeid2];
 
@@ -1099,6 +1165,15 @@ static void mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
           }
         }
         continue;
+      }
+
+      // FEATHER: no geom below one node can collide with one below the other
+      if (nodemask) {
+        const int* mask1 = nodemask + 2*(bvhadr1 + node1);
+        const int* mask2 = nodemask + 2*(bvhadr2 + node2);
+        if (filterBitmask(mask1[0], mask1[1], mask2[0], mask2[1])) {
+          continue;
+        }
       }
 
       // if no intersection at intermediate levels, stop
