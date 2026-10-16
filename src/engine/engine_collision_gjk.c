@@ -2202,7 +2202,12 @@ static void multicontact(int nmeshdegmax, int npolygonmax, uint8_t* buffer, Poly
 
   // determine if any two face normals match
   int res[2], edgecon1 = 0, edgecon2 = 0;
+  mjtNum margin1 = 0.5*obj1->margin, margin2 = 0.5*obj2->margin;
   if (!alignedFaces(res, n1, nnorms1, n2, nnorms2)) {
+    // Inflated EPA edge witnesses are not physical edge endpoints: with a positive margin
+    // keep the original EPA contact; only recovered pairs of physical faces clip below.
+    if (margin1 + margin2 > 0) return;
+
     // check if edge-face collision
     if (nface1 < 3 && nface1 <= nface2) {
       nnorms1 = 0;
@@ -2229,11 +2234,6 @@ static void multicontact(int nmeshdegmax, int npolygonmax, uint8_t* buffer, Poly
       return;
     }
   }
-  // Inflated EPA edge witnesses are not physical edge endpoints. Keep the
-  // original EPA contact for positive-margin edge cases; only recovered pairs
-  // of physical faces participate in the margin-aware clipping below.
-  mjtNum margin1 = 0.5*obj1->margin, margin2 = 0.5*obj2->margin;
-  if (margin1 + margin2 > 0 && (edgecon1 || edgecon2)) return;
   int i = res[0], j = res[1];
 
   // recover geom1 matching edge or face

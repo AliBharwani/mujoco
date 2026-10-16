@@ -12,8 +12,10 @@
 #endif
 
 #include <mujoco/mjfeather.h>
+#include <mujoco/mjmacro.h>
 #include <mujoco/mujoco.h>
 #include "engine/engine_collision_hfield.h"
+#include "engine/engine_core_constraint.h"
 #include "engine/engine_memory.h"
 #include "engine/engine_sleep.h"
 #include "engine/engine_util_blas.h"
@@ -75,7 +77,7 @@ int mjf_layout(const char* type, const char* field) {
 
 int mjf_wakeAll(const mjModel* m, mjData* d) {
   if (!m || !d) return -1;
-  if (!(m->opt.enableflags & mjENBL_SLEEP)) return 0;
+  if (!mjENABLED(mjENBL_SLEEP)) return 0;
   int woke = 0;
   for (int i = 0; i < m->ntree; i++) {
     if (d->tree_asleep[i] >= 0) {
@@ -116,7 +118,7 @@ int mjf_enableHfieldMip(mjModel* m, int id, int enable) {
 static int wakeHfieldRegion(const mjModel* m, mjData* d, int id,
                             int rmin, int rmax, int cmin, int cmax,
                             const mjtByte* dirty, int dirty_row_start) {
-  if (!(m->opt.enableflags & mjENBL_SLEEP)) return 0;
+  if (!mjENABLED(mjENBL_SLEEP)) return 0;
   int nr = m->hfield_nrow[id], nc = m->hfield_ncol[id];
   const mjtNum* size = m->hfield_size + 4*id;
   mjtNum dx = 2*size[0]/(nc-1), dy = 2*size[1]/(nr-1);
@@ -142,9 +144,8 @@ static int wakeHfieldRegion(const mjModel* m, mjData* d, int id,
         mju_sub3(dif, center, hpos);
         mju_mulMatTVec3(local, hmat, dif);
         mju_mulMatTMat3(rotation, hmat, mat);
-        mjtNum margin = mju_max(pair_margin, m->geom_margin[g] + m->geom_margin[hg]);
-        if (m->opt.enableflags & mjENBL_OVERRIDE) margin = m->opt.o_margin;
-        margin = mju_max(0, margin);
+        mjtNum margin = mju_max(0, mj_assignMargin(m, mju_max(pair_margin,
+                                          m->geom_margin[g] + m->geom_margin[hg])));
         mjtNum ex = margin, ey = margin;
         for (int j = 0; j < 3; j++) {
           ex += mju_abs(rotation[j])*aabb[3+j];
@@ -200,21 +201,22 @@ int mjf_writeHfieldRows(mjModel* m, mjData* d, int id, int row_start,
   }
   int nc = m->hfield_ncol[id];
   mjtByte* dirty = NULL;
-  if (count && (m->opt.enableflags & mjENBL_SLEEP)) {
+  if (count && mjENABLED(mjENBL_SLEEP)) {
     mj_markStack(d);
-    dirty = mj_stackAllocByte(d, count, 1);
+    dirty = mjSTACKALLOC(d, count, mjtByte);
     memset(dirty, 0, count);
   }
   float* dst = m->hfield_data + m->hfield_adr[id] + (mjtSize)row_start*nc;
   int rmin = m->hfield_nrow[id], rmax = -1, cmin = nc, cmax = -1;
-  for (int i = 0; i < count; i++) {
-    float v = values[i] < 0 ? 0 : values[i] > 1 ? 1 : values[i];
-    if (dst[i] != v) {
-      if (dirty) dirty[i] = 1;
-      dst[i] = v;
-      int r = row_start+i/nc, c = i%nc;
-      rmin = mjMIN(rmin, r); rmax = mjMAX(rmax, r);
-      cmin = mjMIN(cmin, c); cmax = mjMAX(cmax, c);
+  for (int r = row_start, i = 0; r < row_start+row_count; r++) {
+    for (int c = 0; c < nc; c++, i++) {
+      float v = values[i] < 0 ? 0 : values[i] > 1 ? 1 : values[i];
+      if (dst[i] != v) {
+        if (dirty) dirty[i] = 1;
+        dst[i] = v;
+        rmin = mjMIN(rmin, r); rmax = mjMAX(rmax, r);
+        cmin = mjMIN(cmin, c); cmax = mjMAX(cmax, c);
+      }
     }
   }
   if (rmax >= 0) {

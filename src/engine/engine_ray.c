@@ -1325,7 +1325,7 @@ mjtNum mj_rayMask(const mjModel* m, const mjData* d, const mjtNum pnt[3], const 
 
   // loop over geoms not eliminated by mask and bodyexclude
   for (int i=0; i < ngeom; i++) {
-    if (collision_mask && !((m->geom_contype[i] | m->geom_conaffinity[i]) & *collision_mask)) continue;
+    if (collision_mask && !mj_geomInMask(m, i, *collision_mask)) continue;
     if (!ray_eliminate(m, d, i, geomgroup, flg_static, bodyexclude)) {
       int type = m->geom_type[i];
       if (type == mjGEOM_MESH) {
