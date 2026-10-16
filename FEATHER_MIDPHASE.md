@@ -1,4 +1,4 @@
-# Feather: midphase
+# Feather: broadphase and midphase
 
 The midphase walks the geom trees of two bodies whose boxes overlap and hands each geom pair whose
 boxes meet to the narrowphase. Every change below is bit-exact: the arena replays' trajectory
@@ -42,6 +42,34 @@ Measured on the GladiatorArena replay (40 recorded states, the arena model with 
 10 m cell bodies, Linux, 2 island threads, integration11 → 12): standing, narrowphase 146 → 122
 µs and step 468 → 436 µs (−6.8 %); lying, 171 → 143 and 503 → 473 (−5.9 %). Serial: −6 % and
 −8.4 %.
+
+## Integration13
+
+- **World-axis broadphase.** Upstream boxes every geom in a frame from the covariance of all geom
+  centres (its eigenvectors, then a rotation per geom), sweeps one axis of it, and sorts the pairs.
+  Integration13 boxes each body in world axes: the union of its geoms' boxes, each the overlap of
+  the geom's bounding sphere and its oriented box as upstream builds them, padded by the body's
+  largest margin + gap. The sweep runs along the world axis the box centres spread most on. A body
+  whose weld has no dofs (static or mocap) never pairs with another such body, so the bodies with
+  dofs sweep among themselves and each dof-less box scans only the span of them it covers. The
+  pairs sort by a bucket per first body. Any boxes that hold every geom with its margin give the
+  same contacts: a body pair out of reach finds none in the midphase, and the pairs reach it sorted
+  by signature. Flex models keep upstream's broadphase (its per-vertex boxes).
+- **Explicit rows sphere-first.** Each `<pair>` row runs its bounding-sphere test on its own, with
+  `filterCollisionPair`'s arithmetic, before the rest of the filter: on the arena 95 % of the rows
+  stop there.
+- **Covered pairs by bitmap.** `coveredByPairs` marks the listed geom pairs in a bitmap and then
+  looks for an admitted, unmarked one, instead of scanning the rows for every geom pair.
+
+Measured on the arena replay (Linux, serial, instrumented copy of the driver): broadphase 47 → 17
+µs a substep standing (49 → 18 lying), the explicit rows 9.7 → 7.6 µs, the covered-pair checks
+8.7 → 4.8 µs. Pairs reaching the midphase: 112.6 → 115.3 standing, 158.4 → 158.8 lying.
+
+Not taken: skipping groups of explicit rows by a body-level bounding sphere (it dropped only 30 %
+of the rows and cost more than it saved), per-body root boxes of the trees for the broadphase
+(cheaper boxes, but 20 more body pairs to walk), and caching the static bodies' boxes across steps.
+[Contact reuse](FEATHER_CONTACT_REUSE.md), the integration13 option that is not bit-exact, has its
+own page.
 
 Not taken: skipping explicit pairs whose body pair the broadphase did not report. A check that
 stays correct when masks or margins are edited at runtime costs about what the sphere test it

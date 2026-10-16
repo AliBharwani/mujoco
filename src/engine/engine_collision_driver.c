@@ -26,6 +26,7 @@
 #include "engine/engine_collision_gjk.h"
 #include "engine/engine_collision_hfield.h"
 #include "engine/engine_collision_primitive.h"
+#include "engine/engine_collision_reuse.h"
 #include "engine/engine_collision_sdf.h"
 #include "engine/engine_thread.h"
 #include "engine/engine_core_constraint.h"
@@ -663,9 +664,38 @@ static void fillNodeMasks(const mjModel* m, int* mask, int b) {
 // find is then one filterCollisionPair drops as a duplicate, and the walk is skipped. Read from the
 // live geom masks each step, so a mask edited at runtime is never skipped past.
 static int coveredByPairs(const mjModel* m, int b1, int b2, int pairadr0, int pairadr1) {
-  int geomend1 = m->body_geomadr[b1] + m->body_geomnum[b1];
-  int geomend2 = m->body_geomadr[b2] + m->body_geomnum[b2];
-  for (int g1=m->body_geomadr[b1]; g1 < geomend1; g1++) {
+  int geomadr1 = m->body_geomadr[b1], n1 = m->body_geomnum[b1];
+  int geomadr2 = m->body_geomadr[b2], n2 = m->body_geomnum[b2];
+  int geomend1 = geomadr1 + n1;
+  int geomend2 = geomadr2 + n2;
+
+  // up to 4096 geom pairs: mark the listed pairs in a bitmap, then look for an unmarked one
+  if (n1*n2 <= 4096) {
+    unsigned long long listed[64];
+    memset(listed, 0, sizeof(unsigned long long) * ((n1*n2 + 63) / 64));
+    for (int k=pairadr0; k < pairadr1; k++) {
+      int i = m->pair_geom1[k] - geomadr1, j = m->pair_geom2[k] - geomadr2;
+      if (i < 0 || i >= n1 || j < 0 || j >= n2) {
+        i = m->pair_geom2[k] - geomadr1;
+        j = m->pair_geom1[k] - geomadr2;
+      }
+      if (i >= 0 && i < n1 && j >= 0 && j < n2) {
+        listed[(i*n2 + j) >> 6] |= 1ULL << ((i*n2 + j) & 63);
+      }
+    }
+    for (int i=0; i < n1; i++) {
+      for (int j=0; j < n2; j++) {
+        if (!(listed[(i*n2 + j) >> 6] & (1ULL << ((i*n2 + j) & 63))) &&
+            !filterBitmask(m->geom_contype[geomadr1+i], m->geom_conaffinity[geomadr1+i],
+                           m->geom_contype[geomadr2+j], m->geom_conaffinity[geomadr2+j])) {
+          return 0;
+        }
+      }
+    }
+    return 1;
+  }
+
+  for (int g1=geomadr1; g1 < geomend1; g1++) {
     for (int g2=m->body_geomadr[b2]; g2 < geomend2; g2++) {
       if (filterBitmask(m->geom_contype[g1], m->geom_conaffinity[g1],
                         m->geom_contype[g2], m->geom_conaffinity[g2])) {
@@ -682,6 +712,23 @@ static int coveredByPairs(const mjModel* m, int b1, int b2, int pairadr0, int pa
     }
   }
   return 1;
+}
+
+
+// FEATHER: queue explicit pair row k if filterCollisionPair passes it. The bounding-sphere test,
+// which drops most rows, runs first on its own, with filterCollisionPair's arithmetic.
+static inline void queueRow(const mjModel* m, mjData* d, int k, int* ngeompair) {
+  int g1 = m->pair_geom1[k], g2 = m->pair_geom2[k];
+  mjtNum rbound1 = m->geom_rbound[g1], rbound2 = m->geom_rbound[g2];
+  if (rbound1 > 0 && rbound2 > 0 &&
+      filterSphere(d->geom_xpos + 3*g1, d->geom_xpos + 3*g2,
+                   rbound1 + rbound2 + (getMargin(m, g1, g2, k) + getGap(m, g1, g2, k)))) {
+    return;
+  }
+  if (filterCollisionPair(m, d, g1, g2, k, 0, 0, 0)) {
+    pushGeomGeom(m, d, g1, g2, k);
+    (*ngeompair)++;
+  }
 }
 
 
@@ -707,6 +754,11 @@ void mj_collision(const mjModel* m, mjData* d) {
   // reset the visualization flags
   if (m->vis.global.bvactive) {
     memset(d->bvh_active, 0, m->nbvh);
+  }
+
+  // FEATHER: a new pass of contact reuse
+  if (mj_reuseCache(d)) {
+    mj_reuseBeginStep(mj_reuseCache(d));
   }
 
   mj_markStack(d);
@@ -738,6 +790,7 @@ void mj_collision(const mjModel* m, mjData* d) {
   // process bodyflex pairs returned by broadphase, merge with predefined geom pairs
   int pairadr = 0, ngeompair = 0, g1, g2;
 
+
   // align the arena for candidate collision pairs for narrowphase
   size_t parena = alignArena(d, _Alignof(int));
 
@@ -768,11 +821,7 @@ void mj_collision(const mjModel* m, mjData* d) {
       if (merged && mergeadr < 0) {
         mergeadr = pairadr;
       }
-      g1 = m->pair_geom1[pairadr], g2 = m->pair_geom2[pairadr];
-      if (filterCollisionPair(m, d, g1, g2, pairadr, 0, 0, 0)) {
-        pushGeomGeom(m, d, g1, g2, pairadr);
-        ngeompair++;
-      }
+      queueRow(m, d, pairadr, &ngeompair);
     }
 
     // apply bitmask filtering at the bodyflex level
@@ -954,11 +1003,7 @@ void mj_collision(const mjModel* m, mjData* d) {
 
   // finish merging predefined geom pairs
   for (; pairadr < npair; pairadr++) {
-    g1 = m->pair_geom1[pairadr], g2 = m->pair_geom2[pairadr];
-    if (filterCollisionPair(m, d, g1, g2, pairadr, 0, 0, 0)) {
-      pushGeomGeom(m, d, g1, g2, pairadr);
-      ngeompair++;
-    }
+    queueRow(m, d, pairadr, &ngeompair);
   }
 
   // flush remaining collision pairs
@@ -1711,6 +1756,204 @@ static inline int uintcmp(int* i, int* j, void* context) {
 mjSORT(bfsort, int, uintcmp);
 
 
+// FEATHER: a body box's low end on the sweep axis, and its index
+typedef struct {
+  mjtNum lo;
+  int i;
+} mjtBoxKey;
+
+static inline int boxKeyCmp(mjtBoxKey* a, mjtBoxKey* b, void* context) {
+  return a->lo < b->lo ? -1 : (a->lo > b->lo ? 1 : 0);
+}
+
+mjSORT(boxKeySort, mjtBoxKey, boxKeyCmp);
+
+
+// FEATHER: add bodies id[i], id[j] of boxPairs as a pair if their boxes overlap on the two axes
+// besides the sweep axis, the live bitmask of their geoms admits them (as add_pair tests it), and
+// the sleep and weld filters pass them
+static inline void boxPair(const mjModel* m, const mjtNum* box, const int* info, const int* id,
+                           int i, int j, int ay, int az, int dsbl_filterparent,
+                           int* npair, int* bfpair, int maxpair) {
+  const mjtNum* bi = box + 6*i;
+  const mjtNum* bj = box + 6*j;
+  if ((bi[ay] > bj[3+ay]) | (bj[ay] > bi[3+ay]) | (bi[az] > bj[3+az]) | (bj[az] > bi[3+az])) {
+    return;
+  }
+  const int* fi = info + 6*i;
+  const int* fj = info + 6*j;
+  if ((!(fi[0] & fj[1]) && !(fj[0] & fi[1])) ||
+      filterBodyPair(fi[2], fi[3], fi[5], fi[4], fj[2], fj[3], fj[5], fj[4], dsbl_filterparent)) {
+    return;
+  }
+  add_pair(NULL, id[i], id[j], npair, bfpair, maxpair);
+}
+
+
+// FEATHER: body pairs by world-axis boxes. A body's box is the union of its geoms' boxes, each the
+// overlap of the geom's bounding sphere and its oriented box as upstream builds them in a
+// covariance frame, padded by the largest margin + gap among the body's geoms. World axes drop the
+// frame: the covariance, its eigenvectors and a rotation per geom. The boxes sort by their low end
+// along the axis their centres spread most on, and each box is paired with those starting before it
+// ends that overlap it on the other two axes. Any boxes that hold every geom with its margin give
+// the same contacts: a body pair out of reach finds none in the midphase, and the pairs reach it
+// sorted by signature.
+static int boxPairs(const mjModel* m, mjData* d, int* bfpair, int npair, int maxpair,
+                    int sleep_filter, int dsbl_filterparent) {
+  int nbody = m->nbody;
+  mj_markStack(d);
+  int* id = mjSTACKALLOC(d, nbody, int);
+  int n = 0;
+  for (int b=1; b < nbody; b++) {
+    if (canCollide(m, b)) {
+      id[n++] = b;
+    }
+  }
+  if (n < 2) {
+    mj_freeStack(d);
+    return npair;
+  }
+
+  // per body: the box (xmin[3], xmax[3]) and the pair filter's inputs: the live masks of its geoms,
+  // its weld body, the weld's parent weld, the weld's dofs, asleep
+  mjtNum* box = mjSTACKALLOC(d, 6*n, mjtNum);
+  int* info = mjSTACKALLOC(d, 6*n, int);
+  mjtNum override_margin = mjENABLED(mjENBL_OVERRIDE) ? 0.5 * m->opt.o_margin : 0;
+  mjtNum sum[3] = {0, 0, 0}, sumsq[3] = {0, 0, 0};
+  for (int i=0; i < n; i++) {
+    int b = id[i];
+    int geomend = m->body_geomadr[b] + m->body_geomnum[b];
+    mjtNum lo[3] = {mjMAXVAL, mjMAXVAL, mjMAXVAL}, hi[3] = {-mjMAXVAL, -mjMAXVAL, -mjMAXVAL};
+    mjtNum pad = -mjMAXVAL;
+    int contype = 0, conaffinity = 0;
+    for (int g=m->body_geomadr[b]; g < geomend; g++) {
+      pad = mju_max(pad, override_margin ? override_margin : m->geom_margin[g] + m->geom_gap[g]);
+      contype |= m->geom_contype[g];
+      conaffinity |= m->geom_conaffinity[g];
+      const mjtNum* aabb = m->geom_aabb + 6*g;
+      const mjtNum* xpos = d->geom_xpos + 3*g;
+      const mjtNum* xmat = d->geom_xmat + 9*g;
+      mjtNum rbound = m->geom_rbound[g];
+      for (int k=0; k < 3; k++) {
+        const mjtNum* row = xmat + 3*k;
+        mjtNum cen = xpos[k] + row[0]*aabb[0] + row[1]*aabb[1] + row[2]*aabb[2];
+        mjtNum half = mju_abs(row[0])*aabb[3] + mju_abs(row[1])*aabb[4] + mju_abs(row[2])*aabb[5];
+        mjtNum glo = cen - half > xpos[k] - rbound ? cen - half : xpos[k] - rbound;
+        mjtNum ghi = cen + half < xpos[k] + rbound ? cen + half : xpos[k] + rbound;
+        lo[k] = glo < lo[k] ? glo : lo[k];
+        hi[k] = ghi > hi[k] ? ghi : hi[k];
+      }
+    }
+    mjtNum* bbox = box + 6*i;
+    for (int k=0; k < 3; k++) {
+      bbox[k] = lo[k] - pad;
+      bbox[k+3] = hi[k] + pad;
+      mjtNum cen = 0.5 * (lo[k] + hi[k]);
+      sum[k] += cen;
+      sumsq[k] += cen*cen;
+    }
+    int weld = m->body_weldid[b];
+    int* binfo = info + 6*i;
+    binfo[0] = contype;
+    binfo[1] = conaffinity;
+    binfo[2] = weld;
+    binfo[3] = m->body_weldid[m->body_parentid[weld]];
+    binfo[4] = m->body_dofnum[weld];
+    binfo[5] = sleep_filter ? d->body_awake[b] == mjS_ASLEEP : 0;
+  }
+
+  // sweep axis: the world axis along which the box centres spread most
+  int ax = 0;
+  mjtNum spread = -1;
+  for (int k=0; k < 3; k++) {
+    mjtNum var = sumsq[k] - sum[k]*sum[k]/n;
+    if (var > spread) {
+      spread = var;
+      ax = k;
+    }
+  }
+  int ay = (ax + 1) % 3, az = (ax + 2) % 3;
+
+  // a body whose weld has no dofs (static or mocap) never pairs with another such body: sweep the
+  // bodies with dofs among themselves, then scan the span of them each dof-less box covers
+  mjtBoxKey* key = mjSTACKALLOC(d, n, mjtBoxKey);
+  mjtBoxKey* buf = mjSTACKALLOC(d, n, mjtBoxKey);
+  int* still = mjSTACKALLOC(d, n, int);
+  int nkey = 0, nstill = 0;
+  mjtNum reach = 0;  // the longest box with dofs along the sweep axis
+  for (int i=0; i < n; i++) {
+    if (info[6*i + 4]) {
+      key[nkey].lo = box[6*i + ax];
+      key[nkey++].i = i;
+      reach = box[6*i + 3 + ax] - box[6*i + ax] > reach ? box[6*i + 3 + ax] - box[6*i + ax] : reach;
+    } else {
+      still[nstill++] = i;
+    }
+  }
+  boxKeySort(key, buf, nkey, NULL);
+
+  for (int a=0; a < nkey; a++) {
+    int i = key[a].i;
+    for (int c=a+1; c < nkey && key[c].lo <= box[6*i + 3 + ax]; c++) {
+      boxPair(m, box, info, id, i, key[c].i, ay, az, dsbl_filterparent, &npair, bfpair, maxpair);
+    }
+  }
+
+  for (int s=0; s < nstill; s++) {
+    int i = still[s];
+
+    // the first box with dofs whose low end is within reach of this box's
+    int c = 0, cend = nkey;
+    while (c < cend) {
+      int mid = (c + cend) / 2;
+      if (key[mid].lo < box[6*i + ax] - reach) {
+        c = mid + 1;
+      } else {
+        cend = mid;
+      }
+    }
+    for (; c < nkey && key[c].lo <= box[6*i + 3 + ax]; c++) {
+      int j = key[c].i;
+      if (box[6*j + 3 + ax] >= box[6*i + ax]) {
+        boxPair(m, box, info, id, i, j, ay, az, dsbl_filterparent, &npair, bfpair, maxpair);
+      }
+    }
+  }
+
+  mj_freeStack(d);
+  return npair;
+}
+
+
+// FEATHER: sort body pairs by signature, the order bfsort gives: bucket them by their first body,
+// then an insertion sort moves each only within its bucket (a handful of pairs)
+static void sortPairs(mjData* d, int* pair, int npair, int nbody) {
+  mj_markStack(d);
+  int* start = mjSTACKALLOC(d, nbody + 1, int);
+  int* buf = mjSTACKALLOC(d, npair, int);
+  memset(start, 0, sizeof(int) * (nbody + 1));
+  for (int i=0; i < npair; i++) {
+    start[(pair[i] >> 16) + 1]++;
+  }
+  for (int b=0; b < nbody; b++) {
+    start[b+1] += start[b];
+  }
+  for (int i=0; i < npair; i++) {
+    buf[start[pair[i] >> 16]++] = pair[i];
+  }
+  for (int i=1; i < npair; i++) {
+    int v = buf[i], j = i - 1;
+    while (j >= 0 && buf[j] > v) {
+      buf[j+1] = buf[j];
+      j--;
+    }
+    buf[j+1] = v;
+  }
+  memcpy(pair, buf, sizeof(int) * npair);
+  mj_freeStack(d);
+}
+
+
 // broadphase collision detector
 int mj_broadphase(const mjModel* m, mjData* d, int* bfpair, int maxpair) {
   int npair = 0, nbody = m->nbody, ngeom = m->ngeom;
@@ -1760,6 +2003,15 @@ int mj_broadphase(const mjModel* m, mjData* d, int* bfpair, int maxpair) {
         add_pair(m, b1, nbody+f, &npair, bfpair, maxpair);
       }
     }
+  }
+
+  // FEATHER: world-axis boxes, one per body, unless flexes need upstream's per-vertex boxes
+  if (!nflex) {
+    npair = boxPairs(m, d, bfpair, npair, maxpair, sleep_filter, dsbl_filterparent);
+    if (npair > 1) {
+      sortPairs(d, bfpair, npair, nbody);
+    }
+    return npair;
   }
 
   // find center of non-world geoms and flex vertices; return if none
@@ -2097,6 +2349,7 @@ typedef struct {
   int npair;                  // number of collision pairs
   int chunksize;              // number of pairs to process per task
   int maxcon;                 // maximum number of contacts (size of conbuffer)
+  const int* replayed;        // FEATHER: contacts contact reuse replayed per pair, -1: collide
 } mjContactArg;
 
 
@@ -2114,6 +2367,11 @@ static void collisionTask(const mjModel* m, mjData* d, void* arg, int thread_id,
 
   mjc_setCCDBuffer(epabuffer + thread_id * conargs->ccd_size);
   for (int i = 0; i < n; i++) {
+    // FEATHER: contacts replayed from the last collision are already in the buffer
+    if (conargs->replayed && conargs->replayed[globalidx + i] >= 0) {
+      ncon[i] = conargs->replayed[globalidx + i];
+      continue;
+    }
     int g1 = pair[i].geom_geom.g1;
     int g2 = pair[i].geom_geom.g2;
     int ipair = pair[i].geom_geom.ipair;
@@ -2186,12 +2444,40 @@ static void mj_narrowphase(const mjModel* m, mjData* d, const mjcPair* buffer, i
   arg.chunksize = chunksize;
   arg.maxcon = maxcon;
 
+  // FEATHER: replay the pairs contact reuse can, into their place in the buffer
+  struct mjfContactCache_* reuse = mj_reuseCache(d);
+  int* replayed = NULL;
+  if (reuse) {
+    replayed = mjSTACKALLOC(d, npair, int);
+    for (int i = 0; i < npair; i++) {
+      const mjcPair* pair = pairbuffer + i;
+      int g1 = pair->geom_geom.g1, g2 = pair->geom_geom.g2, ipair = pair->geom_geom.ipair;
+      int room = (i + 1 < npair ? pairbuffer[i+1].conpos : maxcon) - pair->conpos;
+      replayed[i] = mj_reuseLookup(m, d, reuse, g1, g2,
+                                   getMargin(m, g1, g2, ipair) + getGap(m, g1, g2, ipair),
+                                   arg.conbuffer + pair->conpos, room);
+    }
+  }
+  arg.replayed = replayed;
+
   // dispatch narrowphase to threads with local stack allocation for EPA
   {
     mj_markStack(d);
     arg.epabuffer = mj_stackAllocByte(d, ccd_size * nthread, sizeof(mjtNum));
     mju_dispatch(m, d, collisionTask, &arg, nchunk);
     mj_freeStack(d);
+  }
+
+  // FEATHER: record the pairs that collided
+  if (reuse) {
+    for (int i = 0; i < npair; i++) {
+      if (replayed[i] < 0) {
+        const mjcPair* pair = pairbuffer + i;
+        int g1 = pair->geom_geom.g1, g2 = pair->geom_geom.g2, ipair = pair->geom_geom.ipair;
+        mj_reuseStore(m, d, reuse, g1, g2, getMargin(m, g1, g2, ipair) + getGap(m, g1, g2, ipair),
+                      arg.conbuffer + pair->conpos, arg.nconbuffer[i]);
+      }
+    }
   }
 
   int ncon = 0;
@@ -2256,16 +2542,24 @@ static void mj_collideGeoms(const mjModel* m, mjData* d, int g1, int g2, char* e
     return;
   }
 
+  // FEATHER: contact reuse replays the pair, or it collides and is recorded
   mjPreContact precon[mjMAXCONPAIR];
-  mjc_setCCDBuffer(epabuffer);
-  int ncon = mjCOLLISIONFUNC[m->geom_type[g1]][m->geom_type[g2]](m, d, precon, g1, g2,
-                                                                  margin + gap);
-  mjc_setCCDBuffer(NULL);
+  struct mjfContactCache_* reuse = mj_reuseCache(d);
+  int ncon = reuse ? mj_reuseLookup(m, d, reuse, g1, g2, margin + gap, precon, maxcon) : -1;
+  if (ncon < 0) {
+    mjc_setCCDBuffer(epabuffer);
+    ncon = mjCOLLISIONFUNC[m->geom_type[g1]][m->geom_type[g2]](m, d, precon, g1, g2,
+                                                               margin + gap);
+    mjc_setCCDBuffer(NULL);
 
-  // SHOULD NOT OCCUR
-  if (ncon > maxcon) {
-    mjERROR("collision function returned %d contacts for geom pair (%d, %d), "
-            "expected at most %d from mj_maxContact", ncon, g1, g2, maxcon);
+    // SHOULD NOT OCCUR
+    if (ncon > maxcon) {
+      mjERROR("collision function returned %d contacts for geom pair (%d, %d), "
+              "expected at most %d from mj_maxContact", ncon, g1, g2, maxcon);
+    }
+    if (reuse) {
+      mj_reuseStore(m, d, reuse, g1, g2, margin + gap, precon, ncon);
+    }
   }
 
   if (!ncon) {

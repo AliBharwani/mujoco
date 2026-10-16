@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "engine/engine_collision_reuse.h"
 #include "engine/engine_io.h"
 
 #include <inttypes.h>  // IWYU pragma: keep
@@ -1064,6 +1065,7 @@ void mj_makeRawData(mjData** dest, const mjModel* m) {
   if (!allocate) {
     d = *dest;
     freeDataBuffers(d);
+    mj_reuseFree(d);  // FEATHER: the cache names another model's geoms
   } else {
     d = (mjData*) mju_malloc(sizeof(mjData));
   }
@@ -1071,6 +1073,7 @@ void mj_makeRawData(mjData** dest, const mjModel* m) {
   if (!d) {
     mjERROR("could not allocate mjData");
   }
+  d->contactcache = NULL;  // FEATHER: contact reuse starts off
 
   // prevent spurious timing print from mj_resetData before _resetData zeroes the struct
   d->timer[mjTIMER_STEP].number = 0;
@@ -1168,10 +1171,17 @@ mjData* mj_copyDataVisual(mjData* dest, const mjModel* m, const mjData* src, int
   // save pointers, copy everything, restore pointers
   save_buffer = dest->buffer;
   save_arena = dest->arena;
+  void* save_contactcache = dest->contactcache;  // FEATHER
   *dest = *src;
   dest->buffer = save_buffer;
   dest->arena = save_arena;
   dest->threadpool = 0;
+  dest->contactcache = save_contactcache;
+
+  // FEATHER: a full copy carries the contact reuse cache, so it steps as the source would
+  if (flg_all) {
+    mj_reuseCopy(dest, src);
+  }
   mj_setPtrData(m, dest);
 
   // save plugin_data, since the X macro copying block below will override it
@@ -1304,6 +1314,9 @@ static void _resetData(const mjModel* m, mjData* d, unsigned char debug_value) {
   }
 
   //------------------------------ clear header
+
+  // FEATHER: forget every contact reuse entry
+  mj_reuseClear(d);
 
   // clear stack pointer
   if (!d->threadpool) {
@@ -1687,6 +1700,7 @@ void mj_resetDataKeyframe(const mjModel* m, mjData* d, int key) {
 void mj_deleteData(mjData* d) {
   if (d) {
     mju_threadpool(d, 0);
+    mj_reuseFree(d);  // FEATHER
     freeDataBuffers(d);
     mju_free(d);
   }

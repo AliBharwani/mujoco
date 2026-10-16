@@ -42,6 +42,24 @@ MJAPI void mjf_enableTimers(int enable);
 MJAPI int mjf_setHfieldCollider(mjModel* m, int id, int collider);
 MJAPI int mjf_hfieldCollider(const mjModel* m, int id);
 
+// Contact reuse across steps, per mjData, off by default. A geom pair whose relative pose has
+// moved no more than `tolerance` (m: no point of either geom has moved further relative to the
+// other) since its last collision replays that collision's contacts instead of colliding again:
+// each contact's depth is re-measured between a point anchored on each geom, along a normal fixed
+// to the first, and a contact beyond the margin is dropped. Changed margins or sizes, and
+// heightfield writes through mjf_writeHfield* / mjf_wakeHfieldRegion over a pair's footprint,
+// force a new collision. Replayed pairs involve a heightfield, box, mesh, ellipsoid or cylinder;
+// plane, sphere and capsule pairs always collide. mjfREUSE_EMPTY also replays pairs that found no
+// contact, which can report a new contact up to `tolerance` late. The cache is part of the data's
+// state: mj_resetData empties it, mj_copyData copies it, mj_deleteData frees it. Enabling
+// (again) empties it and zeroes the statistics. Returns 0, or -1 for invalid input.
+#define mjfREUSE_EMPTY 1
+MJAPI int mjf_setContactReuse(mjData* d, int enable, mjtNum tolerance, int flags);
+
+// Contact reuse counters since it was enabled: pair lookups, replays, replays of no contact,
+// collisions recorded. Returns 0, or -1 while reuse is off.
+MJAPI int mjf_contactReuseStats(const mjData* d, long long stats[4]);
+
 // Wake all sleeping islands without changing positions, velocities or applied forces.
 MJAPI int mjf_wakeAll(const mjModel* m, mjData* d);
 
