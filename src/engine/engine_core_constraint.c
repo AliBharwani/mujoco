@@ -1289,8 +1289,8 @@ static int mj_instantiateFriction(const mjModel* m, mjData* d, int count_only, i
 
   // find frictional DOFs
   for (int i=0; i < nv; i++) {
-    // no friction loss: skip
-    if (!m->dof_frictionloss[i]) {
+    // no friction loss, or Feather's smooth passive friction (negative, in mj_passive): skip
+    if (m->dof_frictionloss[i] <= 0) {
       continue;
     }
 

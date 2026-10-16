@@ -651,6 +651,13 @@ static void mj_flexPassiveStretch(const mjModel* m, mjData* d, int f,
 }
 
 
+// Feather: slope d/dv of the smooth passive friction F*tanh(v/v0) of a dof with frictionloss F < 0
+mjtNum mj_frictionSlope(mjtNum frictionloss, mjtNum v) {
+  mjtNum t = mju_tanh(v / mjPASSIVE_FRICTION_V0);
+  return frictionloss / mjPASSIVE_FRICTION_V0 * (1 - t*t);
+}
+
+
 // spring and damper forces
 static void mj_springdamper(const mjModel* m, mjData* d) {
   int nv = m->nv, ntendon = m->ntendon;
@@ -722,6 +729,7 @@ static void mj_springdamper(const mjModel* m, mjData* d) {
 
   // dof-level dampers
   if (enbl_damper) {
+    int enbl_friction = !mjDISABLED(mjDSBL_FRICTIONLOSS);
     int nv_awake = sleep_filter ? d->nv_awake : nv;
     for (int j = 0; j < nv_awake; j++) {
       int i = sleep_filter ? d->dof_awake_ind[j] : j;
@@ -732,6 +740,11 @@ static void mj_springdamper(const mjModel* m, mjData* d) {
       if (damping != 0 || !mju_isZero(poly, mjNPOLY)) {
         mjtNum v = d->qvel[i];
         d->qfrc_damper[i] = -v * mju_polyForce(damping, poly, v, mjNPOLY, 1);
+      }
+
+      // Feather: smooth passive friction (a negative frictionloss, of that size)
+      if (enbl_friction && m->dof_frictionloss[i] < 0) {
+        d->qfrc_damper[i] += m->dof_frictionloss[i] * mju_tanh(d->qvel[i] / mjPASSIVE_FRICTION_V0);
       }
     }
   }

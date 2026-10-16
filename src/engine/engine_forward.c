@@ -826,10 +826,17 @@ void mj_fwdActuation(const mjModel* m, mjData* d) {
       bias = 0.0;
       break;
 
-    case mjBIAS_AFFINE:             // affine: biasprm = [const, kp, kv]
+    case mjBIAS_AFFINE: {           // affine: biasprm = [const, kp, kv, vsat]
+      // Feather speed-shaped brake: vsat > 0 saturates the velocity term at |velocity| = vsat
+      // (kv*velocity inside the band, constant beyond it); vsat <= 0 is upstream's affine bias
+      mjtNum velocity = d->actuator_velocity[oadr];
+      if (biasprm[3] > 0) {
+        velocity = mju_clip(velocity, -biasprm[3], biasprm[3]);
+      }
       bias = biasprm[0] + biasprm[1]*d->actuator_length[oadr] +
-             biasprm[2]*d->actuator_velocity[oadr];
+             biasprm[2]*velocity;
       break;
+    }
 
     case mjBIAS_MUSCLE:             // muscle passive force
       bias =  mju_muscleBias(d->actuator_length[oadr],
@@ -1408,12 +1415,14 @@ void mj_EulerSkip(const mjModel* m, mjData* d, int skipfactor) {
 
   // check for dof damping if disable flag is not set
   int dof_damping = 0;
+  int enbl_friction = !mjDISABLED(mjDSBL_FRICTIONLOSS);
   if (!mjDISABLED(mjDSBL_EULERDAMP) && !mjDISABLED(mjDSBL_DAMPER)) {
     for (int v=0; v < nv; v++) {
       int i = sleep_filter ? dof_awake_ind[v] : v;
       if (m->dof_damping[i] > 0 ||
           !mju_isZero(m->dof_dampingpoly + mjNPOLY*i, mjNPOLY) ||
-          m->jnt_actuatorid[m->dof_jntid[i]] != -1) {
+          m->jnt_actuatorid[m->dof_jntid[i]] != -1 ||
+          (enbl_friction && m->dof_frictionloss[i] < 0)) {
         dof_damping = 1;
         break;
       }
@@ -1448,6 +1457,11 @@ void mj_EulerSkip(const mjModel* m, mjData* d, int skipfactor) {
         mjtNum damping = m->dof_damping[i]
                          + mj_actuatorDamping(m, mjOBJ_JOINT, m->dof_jntid[i], poly);
         mjtNum damp_deriv = mjd_xPolyForce(damping, poly, qv, mjNPOLY, 1);
+
+        // Feather: smooth passive friction's slope (a negative frictionloss)
+        if (enbl_friction && m->dof_frictionloss[i] < 0) {
+          damp_deriv -= mj_frictionSlope(m->dof_frictionloss[i], qv);
+        }
         d->qH[m->M_rowadr[i] + m->M_rownnz[i] - 1] += m->opt.timestep * damp_deriv;
       }
 

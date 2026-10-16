@@ -29,6 +29,7 @@
 #include "src/engine/engine_derivative_fd.h"
 #include "src/engine/engine_forward.h"
 #include "src/engine/engine_io.h"
+#include "src/engine/engine_passive.h"
 #include "src/engine/engine_util_blas.h"
 #include "src/engine/engine_util_sparse.h"
 #include "test/fixture.h"
@@ -2421,6 +2422,136 @@ TEST_F(DerivativeTest, EffPrecIsSymmetric) {
     mjtNum b = mju_dot(u.data(), Pv.data(), nv);
     EXPECT_THAT(a, MjNear(b, 1e-10, 1e-4))
         << "preconditioner is not symmetric, trial " << trial;
+  }
+}
+
+// Feather speed-shaped brake (biasprm[3] = vsat): the kv term's slope is kv*gear^2 inside
+// |actuator velocity| < vsat and 0 beyond, the derivative of the clipped velocity; vsat = 0 is the
+// upstream slope everywhere; finite differences agree away from the kink
+TEST_F(DerivativeTest, SpeedShapedBrakeDerivative) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option gravity="0 0 0">
+      <flag contact="disable"/>
+    </option>
+    <worldbody>
+      <body>
+        <joint name="hinge"/>
+        <geom size=".1" mass="1"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <general joint="hinge" gear="2" gainprm="7" biastype="affine" biasprm="0 -7 -2"/>
+    </actuator>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+  mjModel* m = model.get();
+  mjData* d = data.get();
+  ASSERT_EQ(m->nD, 1);
+
+  for (mjtNum vsat : {0.0, 1.5}) {
+    m->actuator_biasprm[3] = vsat;
+    // actuator velocity = 2*qvel: the band is |qvel| < 0.75
+    for (mjtNum qvel : {-3.0, -0.5, 0.0, 0.5, 0.7, 0.8, 3.0}) {
+      d->qvel[0] = qvel;
+      d->ctrl[0] = 0.1;
+      mj_forward(m, d);
+
+      // the actuator's own slope
+      mju_zero(d->qDeriv, m->nD);
+      mjd_actuator_vel(m, d);
+      int inside = vsat <= 0 || mju_abs(2 * qvel) < vsat;
+      EXPECT_EQ(d->qDeriv[0], inside ? -8 : 0) << "vsat " << vsat << ", qvel " << qvel;
+
+      // the smooth derivative against finite differences
+      mju_zero(d->qDeriv, m->nD);
+      mjd_smooth_vel(m, d, /*flg_bias=*/1);
+      vector<mjtNum> analytic = AsVector(d->qDeriv, m->nD);
+      mju_zero(d->qDeriv, m->nD);
+      mjd_smooth_velFD(m, d, MjTol(1e-7, 1e-3));
+      EXPECT_THAT(AsVector(d->qDeriv, m->nD), Pointwise(MjNear(1e-7, 3e-3), analytic))
+          << "vsat " << vsat << ", qvel " << qvel;
+    }
+  }
+}
+
+// Feather smooth passive friction: a negative frictionloss F contributes F/v0*(1 - tanh^2(v/v0)),
+// the slope of F*tanh(v/v0), to the dof's qDeriv diagonal; finite differences agree on hinge,
+// slide, ball and free dofs, dense and sparse; no slope with mjDSBL_FRICTIONLOSS or mjDSBL_DAMPER
+TEST_F(DerivativeTest, SmoothFrictionDerivative) {
+  // no gravity: its large bias forces would put round-off into the finite differences
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option gravity="0 0 0">
+      <flag contact="disable"/>
+    </option>
+    <worldbody>
+      <body>
+        <joint name="hinge" damping=".1" frictionloss="-.3"/>
+        <geom type="capsule" size=".02" fromto="0 0 0 .2 0 0"/>
+        <body pos=".2 0 0">
+          <joint name="slide" type="slide" axis="1 0 0" frictionloss="-.2"/>
+          <geom size=".05"/>
+          <body pos=".1 0 0">
+            <joint name="ball" type="ball" frictionloss="-.25"/>
+            <geom type="box" size=".03 .04 .05" pos=".05 0 0"/>
+          </body>
+        </body>
+      </body>
+      <body pos="0 1 1">
+        <joint type="free" frictionloss="-.1"/>
+        <geom type="box" size=".03 .05 .08"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+  mjModel* m = model.get();
+  mjData* d = data.get();
+  int hinge = m->D_rowadr[0] + m->D_diag[0];
+
+  std::mt19937_64 rng(1);
+  std::normal_distribution<double> normal(0, 1);
+  for (mjtJacobian sparsity : {mjJAC_DENSE, mjJAC_SPARSE}) {
+    m->opt.jacobian = sparsity;
+    for (mjtNum scale : {0.0, 0.02, 0.05, 0.3, 1.0}) {
+      for (int i = 0; i < m->nv; i++) {
+        d->qvel[i] = scale * normal(rng);
+      }
+      mj_forward(m, d);
+
+      // the hinge's diagonal: damping and the friction's slope
+      mju_zero(d->qDeriv, m->nD);
+      mjd_smooth_vel(m, d, /*flg_bias=*/0);
+      mjtNum t = mju_tanh(d->qvel[0] / mjPASSIVE_FRICTION_V0);
+      EXPECT_MJTNUM_EQ(d->qDeriv[hinge], -0.1 + -0.3 / mjPASSIVE_FRICTION_V0 * (1 - t*t));
+
+      // everything against finite differences
+      mju_zero(d->qDeriv, m->nD);
+      mjd_smooth_vel(m, d, /*flg_bias=*/1);
+      vector<mjtNum> analytic = AsVector(d->qDeriv, m->nD);
+      mju_zero(d->qDeriv, m->nD);
+      mjd_smooth_velFD(m, d, MjTol(1e-7, 1e-3));
+      EXPECT_THAT(AsVector(d->qDeriv, m->nD), Pointwise(MjNear(1e-7, 3e-3), analytic))
+          << "scale " << scale << ", sparsity " << sparsity;
+    }
+  }
+
+  // disabled: no slope from the friction
+  mju_zero(d->qvel, m->nv);
+  for (int flag : {(int)mjDSBL_FRICTIONLOSS, (int)mjDSBL_DAMPER}) {
+    m->opt.disableflags = flag;
+    mj_forward(m, d);
+    mju_zero(d->qDeriv, m->nD);
+    mjd_smooth_vel(m, d, /*flg_bias=*/0);
+    EXPECT_EQ(d->qDeriv[hinge], flag == mjDSBL_DAMPER ? 0 : -0.1);
   }
 }
 

@@ -33,6 +33,7 @@
 #include "src/engine/engine_core_util.h"
 #include "src/engine/engine_derivative.h"
 #include "src/engine/engine_io.h"
+#include "src/engine/engine_passive.h"
 #include "test/fixture.h"
 
 #ifdef MEMORY_SANITIZER
@@ -4012,6 +4013,198 @@ TEST_F(ForwardTest, GatedFlexInverseConsistency) {
   // passive forces
   mjtNum scale = 1 + mju_norm(data->qfrc_passive, nv);
   EXPECT_LT(mju_norm(data->qfrc_inverse, nv), 1e-6 * scale);
+}
+
+// Feather speed-shaped brake: an affine bias reads biasprm = [const, kp, kv, vsat]; vsat > 0 clips
+// the velocity of the kv term to +-vsat (in actuator velocity), vsat <= 0 is the affine bias as
+// upstream; the gain term, the dynamics and forcerange are unchanged
+TEST_F(ActuatorTest, SpeedShapedBrake) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option gravity="0 0 0"/>
+    <worldbody>
+      <body>
+        <joint name="hinge"/>
+        <geom size=".1" mass="1"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <general joint="hinge" gainprm="7" biastype="affine" biasprm=".3 -7 -2"/>
+      <general joint="hinge" gainprm="7" biastype="affine" biasprm=".3 -7 -2 -1"/>
+      <general joint="hinge" gainprm="7" biastype="affine" biasprm=".3 -7 -2 1.5"/>
+      <general joint="hinge" gainprm="7" biastype="affine" biasprm=".3 -7 -2 1.5" gear="2"/>
+      <general joint="hinge" gainprm="0" biastype="affine" biasprm=".3 -7 -2 1.5"
+               dyntype="filterexact" dynprm=".05" actearly="true"/>
+      <general joint="hinge" gainprm="7" biastype="affine" biasprm=".3 -7 -2 1.5"
+               forcelimited="true" forcerange="-4 4"/>
+    </actuator>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+  mjModel* m = model.get();
+  mjData* d = data.get();
+
+  for (mjtNum qvel : {-30.0, -1.5, -0.75, 0.0, 0.7, 1.5, 1.6, 40.0}) {
+    mj_resetData(m, d);
+    d->qpos[0] = 0.25;
+    d->qvel[0] = qvel;
+    for (int i = 0; i < m->nu; i++) {
+      d->ctrl[i] = 0.1;
+    }
+    mj_forward(m, d);
+
+    for (int i = 0; i < m->nu; i++) {
+      const mjtNum* prm = m->actuator_biasprm + mjNBIAS*i;
+      mjtNum velocity = d->actuator_velocity[i];
+      if (prm[3] > 0) {
+        velocity = mju_clip(velocity, -prm[3], prm[3]);
+      }
+      mjtNum force = m->actuator_gainprm[mjNGAIN*i] * d->ctrl[i];
+      force += prm[0] + prm[1]*d->actuator_length[i] + prm[2]*velocity;
+      if (m->actuator_forcelimited[i]) {
+        force = mju_clip(force, m->actuator_forcerange[2*i], m->actuator_forcerange[2*i+1]);
+      }
+      EXPECT_MJTNUM_EQ(d->actuator_force[i], force) << "actuator " << i << ", qvel " << qvel;
+    }
+  }
+
+  // at qvel = 40: the kv term is -2*40 off and -2*1.5 on, -2*1.5 also at gear 2 (velocity 80)
+  EXPECT_MJTNUM_EQ(d->actuator_force[0], 0.7 + 0.3 - 1.75 - 80);
+  EXPECT_MJTNUM_EQ(d->actuator_force[1], 0.7 + 0.3 - 1.75 - 80);
+  EXPECT_MJTNUM_EQ(d->actuator_force[2], 0.7 + 0.3 - 1.75 - 3);
+  EXPECT_MJTNUM_EQ(d->actuator_force[3], 0.7 + 0.3 - 3.5 - 3);
+  EXPECT_MJTNUM_EQ(d->actuator_force[4], 0.3 - 1.75 - 3);
+  EXPECT_MJTNUM_EQ(d->actuator_force[5], -3.75);
+}
+
+// Feather speed-shaped brake: biasprm[3] survives the compiler's dampratio conversion of biasprm[2]
+TEST_F(ActuatorTest, SpeedShapedBrakeDampRatio) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <body>
+        <joint name="slide" type="slide"/>
+        <geom size=".1" mass="2"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <general joint="slide" gainprm="10" biastype="affine" biasprm="0 -10 1 1.5"/>
+    </actuator>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+
+  // dampratio 1 on mass 2 and kp 10: kv = 2*sqrt(10*2)
+  EXPECT_NEAR(model->actuator_biasprm[2], -2 * mju_sqrt(20), MjTol(1e-12, 1e-5));
+  EXPECT_EQ(model->actuator_biasprm[3], 1.5);
+}
+
+// Feather smooth passive friction: Euler integrates its slope implicitly (as joint damping) when
+// eulerdamp is on, so with no other velocity-dependent force Euler and implicit agree; with
+// eulerdamp off it is explicit and differs
+TEST_F(ImplicitIntegratorTest, SmoothFrictionEulerImplicitEquivalent) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <body>
+        <joint axis="1 0 0" frictionloss="-.5"/>
+        <geom type="capsule" size=".01" fromto="0 0 0 0 .1 0"/>
+        <body pos="0 .1 0">
+          <joint axis="0 1 0" frictionloss="-.3"/>
+          <geom type="capsule" size=".01" fromto="0 0 0 .1 0 0"/>
+        </body>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+  mjModel* m = model.get();
+  mjData* d = data.get();
+
+  // 10 Euler steps
+  for (int i = 0; i < 10; i++) {
+    mj_step(m, d);
+  }
+  std::vector<mjtNum> qposEuler = AsVector(d->qpos, m->nq);
+
+  // the same with implicit and implicitfast
+  for (mjtIntegrator integrator : {mjINT_IMPLICIT, mjINT_IMPLICITFAST}) {
+    m->opt.integrator = integrator;
+    mj_resetData(m, d);
+    for (int i = 0; i < 10; i++) {
+      mj_step(m, d);
+    }
+    EXPECT_THAT(AsVector(d->qpos, m->nq), Pointwise(MjNear(1e-14, 1e-6), qposEuler))
+        << "integrator " << integrator;
+  }
+
+  // explicit friction (eulerdamp off) is a different, here unstable, integration
+  m->opt.integrator = mjINT_EULER;
+  m->opt.disableflags |= mjDSBL_EULERDAMP;
+  mj_resetData(m, d);
+  for (int i = 0; i < 10; i++) {
+    mj_step(m, d);
+  }
+  mjtNum diff = 0;
+  for (int i = 0; i < m->nq; i++) {
+    diff += mju_abs(d->qpos[i] - qposEuler[i]);
+  }
+  EXPECT_GT(diff, 1e-6);
+}
+
+// Feather smooth passive friction: its slope makes a stiff friction stable. A light hinge whose
+// friction impulse per step is 3*v0 (timestep*F/I = 0.15 rad/s) comes to rest after at most one
+// overshoot under implicitfast and Euler; the same law applied explicitly (qfrc_applied) chatters
+TEST_F(ImplicitIntegratorTest, SmoothFrictionStiffComesToRest) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option timestep="0.002" gravity="0 0 0"/>
+    <worldbody>
+      <body>
+        <joint name="hinge" frictionloss="-.3"/>
+        <geom size=".1" mass="1"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+  mjModel* m = model.get();
+  mjData* d = data.get();
+  ASSERT_NEAR(m->opt.timestep * 0.3 * m->dof_invweight0[0], 3 * mjPASSIVE_FRICTION_V0, 1e-6);
+
+  for (int mode = 0; mode < 3; mode++) {
+    m->opt.integrator = mode == 0 ? mjINT_IMPLICITFAST : mjINT_EULER;
+    m->dof_frictionloss[0] = mode == 2 ? 0 : -0.3;
+    mj_resetData(m, d);
+    d->qvel[0] = 0.5;
+    int flips = 0;
+    for (int i = 0; i < 100; i++) {
+      if (mode == 2) {
+        d->qfrc_applied[0] = -0.3 * mju_tanh(d->qvel[0] / mjPASSIVE_FRICTION_V0);
+      }
+      mjtNum v = d->qvel[0];
+      mj_step(m, d);
+      flips += (v > 0 && d->qvel[0] < 0) || (v < 0 && d->qvel[0] > 0);
+    }
+    if (mode < 2) {
+      EXPECT_LE(flips, 1) << "mode " << mode;
+      EXPECT_LT(mju_abs(d->qvel[0]), 1e-6) << "mode " << mode;
+    } else {
+      EXPECT_GT(flips, 50);
+      EXPECT_GT(mju_abs(d->qvel[0]), 1e-2);
+    }
+  }
 }
 
 }  // namespace

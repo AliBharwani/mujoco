@@ -2392,8 +2392,11 @@ void mjd_actuator_vel(const mjModel* m, mjData* d) {
 
     // affine bias
     if (m->actuator_biastype[i] == mjBIAS_AFFINE) {
-      // extract bias info: prm = [const, kp, kv]
-      bias_vel = (m->actuator_biasprm + mjNBIAS*i)[2];
+      // extract bias info: prm = [const, kp, kv, vsat]
+      const mjtNum* prm = m->actuator_biasprm + mjNBIAS*i;
+
+      // Feather speed-shaped brake: beyond vsat the velocity term is constant, its derivative 0
+      bias_vel = (prm[3] > 0 && mju_abs(d->actuator_velocity[oadr]) >= prm[3]) ? 0 : prm[2];
     }
 
     // SO3 geodesic servo: kv term, applied to each output row below
@@ -3077,6 +3080,7 @@ void mjd_passive_vel(const mjModel* m, mjData* d) {
   // dof damping
   int nv = m->nv;
   int nv_awake = sleep_filter ? d->nv_awake : nv;
+  int enbl_friction = !mjDISABLED(mjDSBL_FRICTIONLOSS);
   for (int j = 0; j < nv_awake; j++) {
     int i = sleep_filter ? d->dof_awake_ind[j] : j;
     mjtNum v = d->qvel[i];
@@ -3085,6 +3089,11 @@ void mjd_passive_vel(const mjModel* m, mjData* d) {
     mjtNum damping = m->dof_damping[i] + mj_actuatorDamping(m, mjOBJ_JOINT, m->dof_jntid[i], poly);
     int adr = m->D_rowadr[i] + m->D_diag[i];
     d->qDeriv[adr] -= mjd_xPolyForce(damping, poly, v, mjNPOLY, 1);
+
+    // Feather: smooth passive friction's slope
+    if (enbl_friction && m->dof_frictionloss[i] < 0) {
+      d->qDeriv[adr] += mj_frictionSlope(m->dof_frictionloss[i], v);
+    }
   }
 
   // flex edge damping
