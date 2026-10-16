@@ -106,6 +106,44 @@ MJAPI int mjf_overlapSphere(const mjModel* m, const mjData* d,
                             const mjtNum center[3], mjtNum radius,
                             int bodyexclude, int mask, int* geoms, int maxgeoms);
 
+// FEATHER training (integration16): the helpers feather's trainer and tests call, which
+// integration14 trimmed from Unity's core, restored as they were on feather's integration6 line
+// (engine_feather.c, engine_query.c). Unity calls none of them, and nothing in the engine does:
+// a program that never calls them steps exactly as on integration15.
+
+// World-space velocities [angular xyz, linear xyz], body or body-frame origin.
+// Output shape: [ndata, nbody, 6], double precision. No stepping or allocations.
+// Returns -1 for invalid input without writes, otherwise 0.
+MJAPI int mjf_bodyVelocities(const mjModel* m, mjData* const* datas, int ndata,
+                             const int* bodies, int nbody, int object_type, mjtNum* out);
+
+// Training substeps with post-step joint/root velocity clamps and one-shot linear
+// body force on the first substep. Preserve persistent forces; never subtract the
+// impulse after MuJoCo auto-resets. Consume BADQPOS/VEL/ACC warnings per substep.
+// Returns -1 for invalid arguments, otherwise whether any divergence was consumed.
+MJAPI int mjf_stepGuarded(const mjModel* m, mjData* d, int nstep,
+                          const int* joint_dofs, const mjtNum* limits, int njoint,
+                          int root_dof, mjtNum root_cap, int impulse_body,
+                          const mjtNum* impulse_force);
+
+// mjfRayHit as it was before integration14 added the normal: the result of mjf_raycastFiltered.
+typedef struct mjfRayHitNoNormal_ {
+  mjtNum dist;       // distance from origin to hit along the (normalized) ray
+  mjtNum point[3];   // world-space hit point
+  int    geom;       // hit geom id (-1 on miss)
+  int    body;       // body id of the hit geom (-1 on miss)
+} mjfRayHitNoNormal;
+
+// mjf_raycast and mjf_overlapSphere under their names before integration14 (the gameplay
+// "Filtered" pair, whose mask both now take): the same results, the ray's without its normal.
+MJAPI int mjf_raycastFiltered(const mjModel* m, const mjData* d,
+                              const mjtNum origin[3], const mjtNum dir[3],
+                              int bodyexclude, mjtBool include_static, int mask,
+                              mjfRayHitNoNormal* out);
+MJAPI int mjf_overlapSphereFiltered(const mjModel* m, const mjData* d,
+                                    const mjtNum center[3], mjtNum radius,
+                                    int bodyexclude, int mask, int* geoms, int maxgeoms);
+
 #ifdef __cplusplus
 }
 #endif

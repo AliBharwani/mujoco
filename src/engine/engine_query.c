@@ -64,3 +64,37 @@ int mjf_overlapSphere(const mjModel* m, const mjData* d, const mjtNum center[3],
   }
   return found;
 }
+
+// FEATHER training (integration16): the Filtered pair under its names before integration14, for
+// feather's tests. The ray is feather's integration6 mjf_raycastFiltered, its result without the
+// normal; the overlap is mjf_overlapSphere, which integration14 made of mjf_overlapSphereFiltered.
+int mjf_raycastFiltered(const mjModel* m, const mjData* d,
+                        const mjtNum origin[3], const mjtNum dir[3],
+                        int bodyexclude, mjtBool include_static, int mask,
+                        mjfRayHitNoNormal* out) {
+  if (out) {
+    out->dist = -1;
+    mju_zero3(out->point);
+    out->geom = out->body = -1;
+  }
+  if (!m || !d || !origin || !dir) return 0;
+  for (int j = 0; j < 3; j++) if (!isfinite(origin[j]) || !isfinite(dir[j])) return 0;
+  mjtNum v[3] = {dir[0], dir[1], dir[2]};
+  if (mju_normalize3(v) <= mjMINVAL) return 0;
+  int geom = -1;
+  mjtNum dist = mj_rayMask(m, d, origin, v, NULL, include_static, bodyexclude, &geom, NULL, &mask);
+  if (geom < 0 || dist < 0) return 0;
+  if (out) {
+    out->dist = dist;
+    out->geom = geom;
+    out->body = m->geom_bodyid[geom];
+    mju_addScl3(out->point, origin, v, dist);
+  }
+  return 1;
+}
+
+int mjf_overlapSphereFiltered(const mjModel* m, const mjData* d,
+                              const mjtNum center[3], mjtNum radius,
+                              int bodyexclude, int mask, int* geoms, int maxgeoms) {
+  return mjf_overlapSphere(m, d, center, radius, bodyexclude, mask, geoms, maxgeoms);
+}

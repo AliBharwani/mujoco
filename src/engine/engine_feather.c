@@ -214,3 +214,72 @@ int mjf_writeHfieldRows(mjModel* m, mjData* d, int id, int row_start,
   if (dirty) mj_freeStack(d);
   return rmax >= 0;
 }
+
+// FEATHER training (integration16): mjf_bodyVelocities and mjf_stepGuarded, as on feather's
+// integration6 line (integration14 trimmed them from Unity's core, which calls neither).
+
+int mjf_bodyVelocities(const mjModel* m, mjData* const* datas, int ndata,
+                       const int* bodies, int nbody, int object_type, mjtNum* out) {
+  if (!m || ndata < 0 || nbody < 0 ||
+      (object_type != mjOBJ_BODY && object_type != mjOBJ_XBODY) ||
+      (nbody && !bodies) || (ndata && (!datas || (nbody && !out)))) return -1;
+  for (int i = 0; i < ndata; i++) if (!datas[i]) return -1;
+  for (int b = 0; b < nbody; b++) if (bodies[b] < 0 || bodies[b] >= m->nbody) return -1;
+  for (int i = 0; i < ndata; i++) {
+    for (int b = 0; b < nbody; b++) {
+      mj_objectVelocity(m, datas[i], object_type, bodies[b], out, 0);
+      out += 6;
+    }
+  }
+  return 0;
+}
+
+static int consumeDivergence(mjData* d) {
+  int result = 0;
+  for (int w = mjWARN_BADQPOS; w <= mjWARN_BADQACC; w++) {
+    result |= d->warning[w].number != 0;
+    d->warning[w].number = 0;
+  }
+  return result;
+}
+
+static mjtNum clamp(mjtNum v, mjtNum cap) {
+  return v < -cap ? -cap : v > cap ? cap : v;
+}
+
+int mjf_stepGuarded(const mjModel* m, mjData* d, int nstep,
+                    const int* joint_dofs, const mjtNum* limits, int njoint,
+                    int root_dof, mjtNum root_cap, int impulse_body,
+                    const mjtNum* impulse_force) {
+  if (!m || !d || nstep < 0 || njoint < 0 ||
+      (njoint && (!joint_dofs || !limits)) || root_dof < 0 || root_dof + 6 > m->nv ||
+      !isfinite(root_cap) || root_cap <= 0 || impulse_body < -1 || impulse_body >= m->nbody ||
+      (impulse_body >= 0 && !impulse_force)) return -1;
+  for (int j = 0; j < njoint; j++) {
+    if (joint_dofs[j] < 0 || joint_dofs[j] >= m->nv ||
+        !isfinite(limits[j]) || limits[j] < 0) return -1;
+  }
+  if (impulse_body >= 0) {
+    for (int j = 0; j < 3; j++) if (!isfinite(impulse_force[j])) return -1;
+  }
+  if (!nstep) return 0;
+  int diverged = consumeDivergence(d);
+  for (int s = 0; s < nstep; s++) {
+    int impulse = s == 0 && impulse_body >= 0;
+    if (impulse) {
+      for (int j = 0; j < 3; j++) d->xfrc_applied[6*impulse_body + j] += impulse_force[j];
+    }
+    mj_step(m, d);
+    int reset = consumeDivergence(d);
+    diverged |= reset;
+    if (impulse && (!reset || (m->opt.disableflags & mjDSBL_AUTORESET))) {
+      for (int j = 0; j < 3; j++) d->xfrc_applied[6*impulse_body + j] -= impulse_force[j];
+    }
+    for (int j = 0; j < njoint; j++) {
+      int v = joint_dofs[j];
+      d->qvel[v] = clamp(d->qvel[v], limits[j]);
+    }
+    for (int j = 0; j < 6; j++) d->qvel[root_dof + j] = clamp(d->qvel[root_dof + j], root_cap);
+  }
+  return diverged;
+}

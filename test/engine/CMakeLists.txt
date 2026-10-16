@@ -38,6 +38,8 @@ mujoco_test(engine_collision_manifold_test)
 
 mujoco_test(engine_collision_reuse_test)
 
+mujoco_test(engine_feather_training_test)
+
 mujoco_test(engine_collision_gjk_test ADDITIONAL_LINK_LIBRARIES ccd)
 
 mujoco_test(engine_core_constraint_test)

@@ -40,6 +40,16 @@ stack in the game's repository (`tools/mujoco/patches/`, applied in order to ups
   whole island, already-awake trees untouched, never a velocity or a force. Callers sharing a model
   synchronize writes with stepping, wake every other live data, and keep geom transforms current.
 - **Contact reuse.** `mjf_setContactReuse` and `mjf_contactReuseStats`, below.
+- **Feather's training helpers** (integration16). `mjf_stepGuarded` steps a training world `nstep`
+  substeps with the post-step joint and free-root velocity clamps, a one-shot linear force on the
+  first substep (never taken back after an auto-reset) and the BADQPOS/VEL/ACC warnings consumed;
+  `mjf_bodyVelocities` reads `mj_objectVelocity` for many bodies of many datas into one buffer.
+  `mjf_raycastFiltered` and `mjf_overlapSphereFiltered` are `mjf_raycast` and `mjf_overlapSphere`
+  under their names before integration14, the ray's result without its normal
+  (`mjfRayHitNoNormal`). Integration14 trimmed all four from Unity's core; integration16 restores
+  them unchanged from feather's integration6 line, for feather's trainer and tests. Unity calls none
+  of them and nothing in the engine does, so a program that never calls them steps as on
+  integration15.
 
 ## The smooth heightfield collider
 
@@ -97,6 +107,19 @@ changes.
   test before the rest of the filter, and the `<exclude>` scan resumes where the previous body pair
   left it.
 
+## Feather's engine laws
+
+Two laws feather's training asks for, each off until a model's own numbers turn it on
+(integration15; their semantics, cautions and tests:
+[FEATHER_ENGINE_LAWS.md](FEATHER_ENGINE_LAWS.md)):
+
+- **The speed-shaped brake.** An affine-bias actuator's `biasprm[3]` = vsat > 0 clips the velocity
+  in the bias's damping term to ±vsat, so a position servo brakes as upstream's does up to vsat and
+  holds `kv · vsat` beyond it; `mjd_actuator_vel` gives the term zero slope outside the band.
+- **The smooth passive friction.** A negative `dof_frictionloss` is a passive friction of that size,
+  `F · tanh(v / 0.05)`, added with the dof dampers in place of upstream's constraint row; its slope
+  enters the implicit integrators, Euler's implicit damping and the discrete inverse.
+
 ## Positive-margin convex manifolds
 
 With a positive margin, upstream sends box and mesh pairs through its older perturbed-pose path.
@@ -144,7 +167,10 @@ history-dependent friction law that would need its own validated design).
 - Native (`ctest`): `engine_collision_hfield_test` (the depth against a brute-force oracle on five
   terrains, parity with the plane functions on a flat field, continuity while a geom slides across
   cells, the prisms' fallback), `engine_collision_broadphase_test`, `engine_collision_manifold_test`,
-  `engine_collision_reuse_test` and the positive-margin case in `engine_collision_gjk_test`.
+  `engine_collision_reuse_test`, the positive-margin case in `engine_collision_gjk_test`, the
+  laws' cases in the actuator, passive, forward, derivative, inverse and constraint tests, and
+  `engine_feather_training_test` (integration16: each training helper held to the plain calls it
+  stands for).
 - The game's arena replay (`tools/mujoco/replay/` in its repository): recorded GladiatorArena states,
   standing and lying, hashed after stepping; a change meant to be exact keeps the hash on both
   platforms.
