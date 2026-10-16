@@ -1,8 +1,12 @@
 # Feather integration API
 
-`mjfeather.h` exposes the fork's integration API. Since 3.12 integration3,
-`mjModel` includes three model-owned hfield-cache arrays; regenerate bindings
-and use a complete matching bundle. `mjData` and `mjContact` remain unchanged.
+`mjfeather.h` exposes the fork's integration API. Since integration11, `mjModel`
+carries one fork array, `hfield_collider` (each heightfield's convex collider, see
+[smooth heightfield contacts](FEATHER_HFIELD.md)); integration3's three hfield-cache
+arrays are gone. Regenerate bindings and use a complete matching bundle. `mjData`
+and `mjContact` remain unchanged. The [midphase](FEATHER_MIDPHASE.md) changes
+(node masks, class-grouped body trees, covered body pairs, one-pair collisions)
+are internal and bit-exact.
 
 - `mjf_enableTimers(1)` installs a native monotonic wall clock in milliseconds
   (`CLOCK_MONOTONIC` on Linux, `QueryPerformanceCounter` on Windows). It is opt-in

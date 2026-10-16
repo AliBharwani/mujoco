@@ -395,7 +395,8 @@ mjCBoundingVolumeHierarchy::AddBoundingVolume(const int* id, int contype, int co
 
 // create bounding volume hierarchy
 void mjCBoundingVolumeHierarchy::CreateBVH(mjCModel* model,
-                                           const mjCBase* owner) {
+                                           const mjCBase* owner, bool byclass) {
+  byclass_ = byclass;
   std::vector<BVElement> elements;
   Make(elements);
   MakeBVH(elements.begin(), elements.end(), 0, model, owner);
@@ -503,24 +504,55 @@ int mjCBoundingVolumeHierarchy::MakeBVH(
     return index;
   }
 
-  // find longest axis, by a margin of at least mjEPS, default to 0
-  int axis = 0;
-  double edges[3] = {AAMM[3] - AAMM[0], AAMM[4] - AAMM[1], AAMM[5] - AAMM[2]};
-  if (edges[1] >= edges[0] + mjEPS) axis = 1;
-  if (edges[2] >= edges[axis] + mjEPS) axis = 2;
-
-  // find median along the axis
-  auto compare = [&](const BVElement& e1, const BVElement& e2) {
-    if (std::abs(e1.lpos[axis] - e2.lpos[axis]) > mjEPS) {
-      return e1.lpos[axis] < e2.lpos[axis];
+  // FEATHER: while the elements span more than one collision class (contype, conaffinity), split
+  // the list of classes in half instead of space, so every class ends in subtrees of its own and
+  // the midphase's node masks drop a class the other body cannot touch at one node, not at each
+  // leaf. The classes are the compiled ones: a mask edited at runtime only prunes less.
+  int m = 0;
+  if (byclass_) {
+    auto sameclass = [](const BVElement& e1, const BVElement& e2) {
+      return e1.e->Contype() == e2.e->Contype() && e1.e->Conaffinity() == e2.e->Conaffinity();
+    };
+    std::sort(elements_begin, elements_end, [&](const BVElement& e1, const BVElement& e2) {
+      if (!sameclass(e1, e2)) {
+        return e1.e->Contype() != e2.e->Contype() ? e1.e->Contype() < e2.e->Contype()
+                                                  : e1.e->Conaffinity() < e2.e->Conaffinity();
+      }
+      return e1.e < e2.e;
+    });
+    int nclass = 1;
+    for (auto element = elements_begin + 1; element != elements_end; ++element) {
+      nclass += !sameclass(*(element - 1), *element);
     }
-    // comparing pointers gives a stable sort, because they both come from the same array
-    return e1.e < e2.e;
-  };
 
-  // note: nth_element performs a partial sort of elements
-  int m = nelements / 2;
-  std::nth_element(elements_begin, elements_begin + m, elements_end, compare);
+    // split at the first element of the middle class
+    for (int c = 0; c < nclass / 2; ) {
+      m++;
+      c += !sameclass(elements_begin[m - 1], elements_begin[m]);
+    }
+  }
+
+  // one class: split at the median along the longest axis
+  if (!m) {
+    // find longest axis, by a margin of at least mjEPS, default to 0
+    int axis = 0;
+    double edges[3] = {AAMM[3] - AAMM[0], AAMM[4] - AAMM[1], AAMM[5] - AAMM[2]};
+    if (edges[1] >= edges[0] + mjEPS) axis = 1;
+    if (edges[2] >= edges[axis] + mjEPS) axis = 2;
+
+    // find median along the axis
+    auto compare = [&](const BVElement& e1, const BVElement& e2) {
+      if (std::abs(e1.lpos[axis] - e2.lpos[axis]) > mjEPS) {
+        return e1.lpos[axis] < e2.lpos[axis];
+      }
+      // comparing pointers gives a stable sort, because they both come from the same array
+      return e1.e < e2.e;
+    };
+
+    // note: nth_element performs a partial sort of elements
+    m = nelements / 2;
+    std::nth_element(elements_begin, elements_begin + m, elements_end, compare);
+  }
 
   // recursive calls
   if (m > 0) {
@@ -2630,7 +2662,7 @@ void mjCBody::ComputeBVH() {
     tree.AddBoundingVolume(&geom->id, geom->contype, geom->conaffinity,
                            geom->pos, geom->quat, geom->aabb);
   }
-  tree.CreateBVH(model, this);
+  tree.CreateBVH(model, this, /*byclass=*/true);
 }
 
 
